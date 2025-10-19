@@ -1,5 +1,5 @@
 """
-CodingUtils - A comprehensive set of Python utilities for code analysis, 
+CodingUtils - A comprehensive set of Python utilities for code analysis,
 file management, and project documentation.
 """
 
@@ -13,6 +13,6 @@ from .tree_generater import main as tree_generater_main
 
 __all__ = [
     "comment_extractor_main",
-    "merger_main", 
-    "tree_generater_main",
+    "merger_main",
+    "tree_generater_main"
 ]
