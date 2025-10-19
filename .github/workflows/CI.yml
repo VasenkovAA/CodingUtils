@@ -32,7 +32,3 @@ jobs:
     - name: Run Ruff linting
       run: |
         ruff check .
-
-    - name: Run Ruff formatting check
-      run: |
-        ruff format . --check

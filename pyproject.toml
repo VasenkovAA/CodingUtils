@@ -8,14 +8,12 @@ version = "1.0.0"
 description = "A comprehensive set of Python utilities for code analysis, file management, and project documentation"
 readme = "README.md"
 authors = [
-    {name = "CodingUtils Team", email = "codingutils@example.com"}
+    {name = "Andrey", email = "no"}
 ]
-license = {text = "MIT"}
 keywords = ["code", "utilities", "comments", "merger", "tree", "gitignore"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
