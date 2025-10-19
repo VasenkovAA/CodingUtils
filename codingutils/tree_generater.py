@@ -4,12 +4,10 @@ Cross-platform alternative to 'tree' command.
 """
 
 import argparse
-import os
 import fnmatch
-import sys
-from pathlib import Path
-from typing import List, Set, Optional
 import logging
+from pathlib import Path
+from typing import List
 
 
 class GitIgnoreParser:
@@ -23,7 +21,7 @@ class GitIgnoreParser:
         if not gitignore_path.exists():
             return
 
-        with open(gitignore_path, "r", encoding="utf-8") as f:
+        with open(gitignore_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
 
@@ -79,7 +77,9 @@ class ProjectMapper:
         """Setup logging based on configuration."""
         if self.config.output:
             logging.basicConfig(
-                filename=self.config.output, level=logging.INFO, format="%(message)s"
+                filename=self.config.output,
+                level=logging.INFO,
+                format="%(message)s",
             )
         else:
             logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -119,9 +119,7 @@ class ProjectMapper:
         """Generate tree structure of the project."""
         lines = []
 
-        def add_directory_contents(
-            directory: Path, prefix: str = "", is_last: bool = True
-        ):
+        def add_directory_contents(directory: Path, prefix: str = "", is_last: bool = True):
             """Recursively add directory contents to tree."""
             try:
                 items = []
@@ -206,7 +204,7 @@ class ProjectMapper:
             logging.info(line)
 
         logging.info("=" * 60)
-        logging.info(f"Statistics:")
+        logging.info("Statistics:")
         logging.info(f"  Directories: {stats['directories']}")
         logging.info(f"  Files: {stats['files']}")
         logging.info(f"  Total Size: {self.format_size(stats['total_size'])}")
@@ -235,35 +233,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
-        "-d",
-        "--directory",
-        default=".",
-        help="Directory to map (default: current directory)",
-    )
+    parser.add_argument("-d", "--directory", default=".", help="Directory to map (default: current directory)")
 
-    parser.add_argument(
-        "-i",
-        "--gitignore",
-        help="Path to .gitignore file (default: auto-discover in root)",
-    )
+    parser.add_argument("-i", "--gitignore", help="Path to .gitignore file (default: auto-discover in root)")
 
-    parser.add_argument(
-        "-p",
-        "--pattern",
-        default="*",
-        help='File pattern to include (e.g., "*.py" or "*.txt")',
-    )
+    parser.add_argument("-p", "--pattern", default="*", help='File pattern to include (e.g., "*.py" or "*.txt")')
 
-    parser.add_argument(
-        "-o", "--output", help="Output file for tree (default: console)"
-    )
+    parser.add_argument("-o", "--output", help="Output file for tree (default: console)")
 
-    parser.add_argument(
-        "--no-gitignore",
-        action="store_true",
-        help="Ignore .gitignore files even if present",
-    )
+    parser.add_argument("--no-gitignore", action="store_true", help="Ignore .gitignore files even if present")
 
     args = parser.parse_args()
 

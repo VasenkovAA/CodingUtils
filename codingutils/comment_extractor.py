@@ -4,15 +4,14 @@ Supports multiple file types and languages.
 """
 
 import argparse
+import fnmatch
+import logging
 import os
 import re
-import fnmatch
-from pathlib import Path
-from typing import List, Tuple, Optional
-import logging
+from typing import List, Optional, Tuple
 
 try:
-    from langdetect import detect, LangDetectException
+    from langdetect import LangDetectException, detect
 
     LANGDETECT_AVAILABLE = True
 except ImportError:
@@ -53,7 +52,9 @@ class CommentProcessor:
         """Setup logging based on configuration."""
         if self.config.log_file:
             logging.basicConfig(
-                filename=self.config.log_file, level=logging.INFO, format="%(message)s"
+                filename=self.config.log_file,
+                level=logging.INFO,
+                format="%(message)s",
             )
         else:
             logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -73,9 +74,7 @@ class CommentProcessor:
             )
         return symbol
 
-    def is_comment_line(
-        self, line: str, comment_symbol: str
-    ) -> Tuple[bool, Optional[str]]:
+    def is_comment_line(self, line: str, comment_symbol: str) -> Tuple[bool, Optional[str]]:
         """Check if line contains comments and return comment text if found."""
         line = line.rstrip()
 
@@ -83,9 +82,7 @@ class CommentProcessor:
         if stripped.startswith(comment_symbol):
             comment_text = stripped[len(comment_symbol) :].lstrip()
 
-            if self.config.exclude_pattern and stripped.startswith(
-                self.config.exclude_pattern
-            ):
+            if self.config.exclude_pattern and stripped.startswith(self.config.exclude_pattern):
                 return False, None
             return True, comment_text
 
@@ -115,9 +112,7 @@ class CommentProcessor:
                 if not in_string and line[i:].startswith(comment_symbol):
                     comment_text = line[i + len(comment_symbol) :].lstrip()
 
-                    if self.config.exclude_pattern and line[i:].startswith(
-                        self.config.exclude_pattern
-                    ):
+                    if self.config.exclude_pattern and line[i:].startswith(self.config.exclude_pattern):
                         return False, None
                     return True, comment_text
 
@@ -129,15 +124,11 @@ class CommentProcessor:
             return True
 
         if not LANGDETECT_AVAILABLE:
-            logging.warning(
-                "langdetect not available. Installing: pip install langdetect"
-            )
+            logging.warning("langdetect not available. Installing: pip install langdetect")
             return True
 
         try:
-            cleaned_text = re.sub(
-                r"\b(def|class|function|var|let|const|import|from)\b", "", comment_text
-            )
+            cleaned_text = re.sub(r"\b(def|class|function|var|let|const|import|from)\b", "", comment_text)
             cleaned_text = re.sub(r"[^\w\s]", " ", cleaned_text)
             cleaned_text = cleaned_text.strip()
 
@@ -162,11 +153,11 @@ class CommentProcessor:
         new_lines = []
 
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 lines = f.readlines()
         except UnicodeDecodeError:
             try:
-                with open(file_path, "r", encoding="latin-1") as f:
+                with open(file_path, encoding="latin-1") as f:
                     lines = f.readlines()
             except Exception as e:
                 logging.error(f"Error reading {file_path}: {e}")
@@ -240,9 +231,7 @@ class CommentProcessor:
         if os.path.isfile(self.config.directory):
             logging.info(f"Processing single file: {self.config.directory}")
         else:
-            logging.info(
-                f"Found {len(files)} files to process in directory: {self.config.directory}"
-            )
+            logging.info(f"Found {len(files)} files to process in directory: {self.config.directory}")
 
         for file_path in files:
             try:
@@ -254,9 +243,7 @@ class CommentProcessor:
         action = "Removed" if self.config.remove_comments else "Found"
 
         if os.path.isfile(self.config.directory):
-            logging.info(
-                f"{action} {total_removed} comments in file: {self.config.directory}"
-            )
+            logging.info(f"{action} {total_removed} comments in file: {self.config.directory}")
         else:
             logging.info(f"{action} {total_removed} comments in {len(files)} files")
 
@@ -267,9 +254,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
-        "directory", help="Directory to search files in or single file to process"
-    )
+    parser.add_argument("directory", help="Directory to search files in or single file to process")
 
     parser.add_argument(
         "-r",
@@ -309,9 +294,7 @@ def main():
         help="Actually remove comments (without this flag, only detection)",
     )
 
-    parser.add_argument(
-        "-o", "--log-file", help="Log file to write results (default: console)"
-    )
+    parser.add_argument("-o", "--log-file", help="Log file to write results (default: console)")
 
     args = parser.parse_args()
 

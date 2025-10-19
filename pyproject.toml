@@ -55,7 +55,6 @@ include = ["codingutils*"]
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.txt"]
 
-# MyPy configuration
 [tool.mypy]
 python_version = "3.8"
 warn_return_any = true
@@ -63,10 +62,11 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 ignore_missing_imports = true
 
-# Ruff configuration
 [tool.ruff]
 target-version = "py38"
 line-length = 88
+
+[tool.ruff.lint]
 select = [
     "E",  # pycodestyle errors
     "W",  # pycodestyle warnings
@@ -79,8 +79,8 @@ select = [
 ignore = [
     "E501",  # line too long, handled by ruff format
     "B905",  # zip without strict parameter
-    "UP006",  # non-pep585-annotation
-    "UP007",  # non-pep604-annotation
+    "F401",  # unused imports (common in scripts)
+    "F841",  # unused variable (common in scripts)
 ]
 
 [tool.ruff.format]
