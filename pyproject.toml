@@ -38,10 +38,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/codingutils"
-Documentation = "https://github.com/yourusername/codingutils#readme"
-Repository = "https://github.com/yourusername/codingutils"
-"Bug Reports" = "https://github.com/yourusername/codingutils/issues"
+Homepage = "https://github.com/VasenkovAA/CodingUtilsodingutils"
+Documentation = "https://github.com/VasenkovAA/CodingUtils#readme"
+Repository = "https://github.com/VasenkovAA/CodingUtils"
+"Bug Reports" = "https://github.com/VasenkovAA/CodingUtils"
 
 [project.scripts]
 comment-extractor = "codingutils.comment_extractor:main"
