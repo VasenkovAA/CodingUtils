@@ -1,5 +1,5 @@
 """
-CodingUtils - A comprehensive set of Python utilities for code analysis, 
+CodingUtils - A comprehensive set of Python utilities for code analysis,
 file management, and project documentation.
 """
 
