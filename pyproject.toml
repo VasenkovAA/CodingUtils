@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codingutils"
+dynamic = ["version"]
+description = "Python utilities for code analysis and file management"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "langdetect>=1.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "black>=21.0",
+    "flake8>=3.9",
+]
+
+[project.scripts]
+comment-extractor = "codingutils.comment_extractor:main"
+file-merger = "codingutils.merger:main"
+tree-generator = "codingutils.tree_generater:main"
