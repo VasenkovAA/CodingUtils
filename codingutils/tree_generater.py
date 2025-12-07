@@ -74,17 +74,55 @@ class ProjectMapper:
         self.root_dir = Path(config.directory).resolve()
         self.gitignore_parser = GitIgnoreParser()
         self.found_gitignore = False
+        self.output_file = None
         
     def setup_logging(self):
         """Setup logging based on configuration."""
+        # Создаем форматтер
+        formatter = logging.Formatter('%(message)s')
+        
         if self.config.output:
-            logging.basicConfig(
-                filename=self.config.output,
-                level=logging.INFO,
-                format='%(message)s'
-            )
+            # Создаем обработчик файла с режимом записи ('w' вместо 'a')
+            try:
+                file_handler = logging.FileHandler(self.config.output, mode='w', encoding='utf-8')
+                file_handler.setLevel(logging.INFO)
+                file_handler.setFormatter(formatter)
+                
+                # Создаем логгер и добавляем только файловый обработчик
+                self.logger = logging.getLogger('project_mapper')
+                self.logger.setLevel(logging.INFO)
+                
+                # Удаляем все существующие обработчики
+                self.logger.handlers = []
+                
+                # Добавляем файловый обработчик
+                self.logger.addHandler(file_handler)
+                
+                # Отключаем распространение к корневому логгеру
+                self.logger.propagate = False
+                
+                # Сохраняем ссылку на файловый обработчик для закрытия
+                self.file_handler = file_handler
+                
+            except Exception as e:
+                print(f"Error opening output file: {e}", file=sys.stderr)
+                sys.exit(1)
         else:
-            logging.basicConfig(level=logging.INFO, format='%(message)s')
+            # Консольный вывод
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_handler.setFormatter(formatter)
+            
+            self.logger = logging.getLogger('project_mapper')
+            self.logger.setLevel(logging.INFO)
+            self.logger.handlers = []
+            self.logger.addHandler(console_handler)
+            self.logger.propagate = False
+    
+    def cleanup(self):
+        """Clean up resources."""
+        if hasattr(self, 'file_handler'):
+            self.file_handler.close()
     
     def load_gitignore(self) -> None:
         """Load .gitignore file from specified location or auto-discover."""
@@ -93,15 +131,15 @@ class ProjectMapper:
             if gitignore_path.exists():
                 self.gitignore_parser.parse_file(gitignore_path)
                 self.found_gitignore = True
-                logging.info(f"Using .gitignore: {gitignore_path}")
+                self.logger.info(f"Using .gitignore: {gitignore_path}")
             else:
-                logging.warning(f"Specified .gitignore not found: {gitignore_path}")
+                self.logger.warning(f"Specified .gitignore not found: {gitignore_path}")
         else:
             gitignore_path = self.root_dir / '.gitignore'
             if gitignore_path.exists():
                 self.gitignore_parser.parse_file(gitignore_path)
                 self.found_gitignore = True
-                logging.info(f"Auto-discovered .gitignore: {gitignore_path}")
+                self.logger.info(f"Auto-discovered .gitignore: {gitignore_path}")
     
     def should_include_path(self, path: Path, is_dir: bool = False) -> bool:
         """Check if path should be included in the tree."""
@@ -185,11 +223,11 @@ class ProjectMapper:
     def generate_tree(self) -> bool:
         """Generate and output the project tree."""
         if not self.root_dir.exists():
-            logging.error(f"Directory does not exist: {self.root_dir}")
+            self.logger.error(f"Directory does not exist: {self.root_dir}")
             return False
         
         if not self.root_dir.is_dir():
-            logging.error(f"Path is not a directory: {self.root_dir}")
+            self.logger.error(f"Path is not a directory: {self.root_dir}")
             return False
         
         self.load_gitignore()
@@ -198,22 +236,22 @@ class ProjectMapper:
         
         stats = self.get_statistics()
         
-        logging.info(f"Project Tree: {self.root_dir}")
-        logging.info(f"Pattern: {self.config.pattern}")
+        self.logger.info(f"Project Tree: {self.root_dir}")
+        self.logger.info(f"Pattern: {self.config.pattern}")
         if self.found_gitignore:
-            logging.info(".gitignore: Applied")
+            self.logger.info(".gitignore: Applied")
         else:
-            logging.info(".gitignore: Not found or not specified")
-        logging.info("=" * 60)
+            self.logger.info(".gitignore: Not found or not specified")
+        self.logger.info("=" * 60)
         
         for line in tree_lines:
-            logging.info(line)
+            self.logger.info(line)
         
-        logging.info("=" * 60)
-        logging.info(f"Statistics:")
-        logging.info(f"  Directories: {stats['directories']}")
-        logging.info(f"  Files: {stats['files']}")
-        logging.info(f"  Total Size: {self.format_size(stats['total_size'])}")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Statistics:")
+        self.logger.info(f"  Directories: {stats['directories']}")
+        self.logger.info(f"  Files: {stats['files']}")
+        self.logger.info(f"  Total Size: {self.format_size(stats['total_size'])}")
         
         return True
     
@@ -275,7 +313,10 @@ def main():
     mapper = ProjectMapper(args)
     mapper.setup_logging()
     
-    success = mapper.generate_tree()
+    try:
+        success = mapper.generate_tree()
+    finally:
+        mapper.cleanup()
     
     return 0 if success else 1
 
