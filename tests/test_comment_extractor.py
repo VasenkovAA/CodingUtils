@@ -71,17 +71,14 @@ class TestGitIgnoreParser:
         parser = GitIgnoreParser()
         parser.patterns = ["node_modules/", "build/"]
         
-        # Test directory matching
         node_dir = tmp_path / "node_modules"
         node_dir.mkdir()
         assert parser.should_ignore(node_dir, tmp_path) is True
         
-        # Test file inside directory
         node_file = node_dir / "index.js"
         node_file.touch()
         assert parser.should_ignore(node_file, tmp_path) is True
         
-        # Test non-matching directory
         other_dir = tmp_path / "other"
         other_dir.mkdir()
         assert parser.should_ignore(other_dir, tmp_path) is False
@@ -151,20 +148,17 @@ class TestCommentProcessor:
     @pytest.fixture
     def sample_files(self, tmp_path):
         """Create sample files for testing"""
-        # Python file
         py_file = tmp_path / "test.py"
         py_file.write_text("""# This is a comment
 print("Hello")  # Inline comment
 # Another comment""")
         
-        # JavaScript file
         js_file = tmp_path / "test.js"
         js_file.write_text("""// JS comment
 console.log("test"); // Inline
 /* Block comment */
 function test() {}""")
         
-        # CSS file
         css_file = tmp_path / "test.css"
         css_file.write_text("""/* CSS comment */
 body { color: red; }
@@ -244,7 +238,6 @@ body { color: red; }
         """Test path exclusion with gitignore"""
         processor = CommentProcessor(mock_config)
         
-        # Mock gitignore parser
         mock_parser = MagicMock()
         mock_parser.should_ignore.return_value = True
         processor.gitignore_parser = mock_parser
@@ -265,7 +258,6 @@ body { color: red; }
         
         assert processor.should_exclude_path(test_file) is True
         
-        # Test non-excluded directory
         other_file = tmp_path / "other_dir" / "test.py"
         other_file.parent.mkdir()
         other_file.touch()
@@ -299,14 +291,12 @@ body { color: red; }
         test_file.touch()
         assert processor.should_exclude_path(test_file) is True
         
-        # Test with relative path pattern
         temp_dir = tmp_path / "src" / "temp"
         temp_dir.mkdir(parents=True)
         temp_file = temp_dir / "util.py"
         temp_file.touch()
         assert processor.should_exclude_path(temp_file) is True
         
-        # Test non-matching
         other_file = tmp_path / "other.py"
         other_file.touch()
         assert processor.should_exclude_path(other_file) is False
@@ -966,7 +956,6 @@ public class Test {
         test_file = tmp_path / f"test{file_ext}"
         test_file.write_text(test_content.get(file_ext, ""))
         
-        # Create config
         class Config:
             gitignore = None
             use_gitignore = False
@@ -989,25 +978,20 @@ public class Test {
         
         config = Config()
         
-        # Для CSS нужно установить comment_symbols
         if file_ext == ".css":
             config.comment_symbols = ""
         
         processor = CommentProcessor(config)
         removed, comments = processor.process_file(str(test_file))
         
-        # Read file content after processing
         final_content = test_file.read_text()
         
-        # Check that expected number of comments were removed
         assert removed == expected_removed
         
-        # For Python files, check that no '#' remain in final content (except in strings)
         if file_ext == ".py":
             lines = final_content.split('\n')
             for line in lines:
                 if '#' in line and not ('"' in line or "'" in line):
-                    # Check if # is inside a string
                     in_string = False
                     for i, char in enumerate(line):
                         if char in ['"', "'"]:
@@ -1031,7 +1015,6 @@ __pycache__/
         
         gitignore_path.write_text(gitignore_content)
         
-        # Create file structure
         (tmp_path / "module.pyc").touch()
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "utils.pyc").touch()
@@ -1046,27 +1029,21 @@ __pycache__/
         
         parser = GitIgnoreParser(gitignore_path)
         
-        # Test ignored files
         assert parser.should_ignore(tmp_path / "module.pyc", tmp_path) is True
-        # Для вложенных файлов может потребоваться другой подход
         assert parser.should_ignore(tmp_path / "src" / "utils.pyc", tmp_path) is True
         assert parser.should_ignore(tmp_path / "__pycache__", tmp_path) is True
         assert parser.should_ignore(tmp_path / "test.log", tmp_path) is True
         assert parser.should_ignore(tmp_path / "temp.tmp", tmp_path) is True
         
-        # Test not ignored (negation pattern)
         assert parser.should_ignore(tmp_path / "important" / "__pycache__", tmp_path) is False
         
-        # Test not matching
         assert parser.should_ignore(tmp_path / "keep.py", tmp_path) is False
     
     def test_combined_gitignore_language_filter(self, tmp_path):
         """Test combination of gitignore filtering and language detection"""
-        # Create .gitignore
         gitignore_path = tmp_path / ".gitignore"
         gitignore_path.write_text("*.pyc\n*.log\n")
         
-        # Create test files
         english_file = tmp_path / "english.py"
         english_file.write_text("""# This is an English comment
 print("Hello")
@@ -1077,11 +1054,9 @@ print("Hello")
 print("Привет")
 # Еще один русский комментарий""")
         
-        # Create a file that should be ignored
         ignored_file = tmp_path / "test.pyc"
         ignored_file.write_text("# Should be ignored")
         
-        # Create config
         class Config:
             gitignore = str(gitignore_path)
             use_gitignore = False
@@ -1105,10 +1080,8 @@ print("Привет")
         config = Config()
         processor = CommentProcessor(config)
         
-        # Process files
         files = processor.find_files()
         
-        # Should find only .py files (not .pyc)
         assert len(files) == 2
         assert "english.py" in str(files[0]) or "english.py" in str(files[1])
         assert "russian.py" in str(files[0]) or "russian.py" in str(files[1])
@@ -1162,7 +1135,7 @@ print("Привет")
     .content {
         width: 100%;
     }""",
-                "comment_symbols": ""  # Пустой символ для CSS
+                "comment_symbols": ""
             }
         ]
         
@@ -1170,7 +1143,6 @@ print("Привет")
             test_file = tmp_path / f"test_{test_case['name']}{test_case['extension']}"
             test_file.write_text(test_case['input'])
             
-            # Create config
             class Config:
                 gitignore = None
                 use_gitignore = False
@@ -1195,11 +1167,9 @@ print("Привет")
             processor = CommentProcessor(config)
             removed, comments = processor.process_file(str(test_file))
             
-            # Get actual result
             actual_content = test_file.read_text().strip()
             expected_content = test_case['expected'].strip()
             
-            # Compare line by line (ignore trailing whitespace)
             actual_lines = [line.rstrip() for line in actual_content.split('\n')]
             expected_lines = [line.rstrip() for line in expected_content.split('\n')]
             
@@ -1225,7 +1195,6 @@ print("World")  ## SPECIAL_INLINE: Keep this too"""
         
         test_file.write_text(test_content)
         
-        # Create config with exclude_pattern
         class Config:
             gitignore = None
             use_gitignore = False
@@ -1307,16 +1276,12 @@ print("World")  ## SPECIAL_INLINE: Keep this too"""
             config = Config()
             processor = CommentProcessor(config)
             
-            # The actual test might not match exactly due to langdetect confidence
-            # So we'll be lenient here
             result = processor.should_remove_comment(comment_text)
             
-            # If langdetect detected the expected language, result should match should_remove
             if detected == language_code:
                 assert result == should_remove, \
                     f"Language detection mismatch: detected={detected}, expected={language_code}"
         except Exception as e:
-            # langdetect might fail on very short or mixed text
             pytest.skip(f"langdetect failed: {e}")
     
     def test_recursive_search_with_exclusions(self, tmp_path):
@@ -1364,19 +1329,6 @@ print("World")  ## SPECIAL_INLINE: Keep this too"""
         processor = CommentProcessor(config)
         files = processor.find_files()
         
-        # Should include:
-        # - src/app/main.py
-        # - src/app/utils.py
-        # - setup.py
-        
-        # Should exclude:
-        # - src/app/test_app.py (test_* pattern)
-        # - tests/test_main.py (test_* pattern, also tests directory not excluded but files match pattern)
-        # - docs/readme.txt (*.txt pattern and docs exclusion)
-        # - venv/python (venv directory excluded)
-        # - .git/config (.git directory excluded)
-        # - requirements.txt (exact name excluded)
-        
         file_paths = [Path(f).name for f in files]
         
         assert "main.py" in file_paths
@@ -1392,7 +1344,6 @@ print("World")  ## SPECIAL_INLINE: Keep this too"""
     
     def test_export_comments_format(self, tmp_path):
         """Test that exported comments have correct format"""
-        # Create test files
         file1 = tmp_path / "file1.py"
         file1.write_text("""# First comment
 print("Hello")
@@ -1406,7 +1357,6 @@ console.log("test");""")
         
         export_file = tmp_path / "exported_comments.txt"
         
-        # Create config
         class Config:
             gitignore = None
             use_gitignore = False
@@ -1430,25 +1380,20 @@ console.log("test");""")
         config = Config()
         processor = CommentProcessor(config)
         processor.process_files()
-        
-        # Check export file format
+
         assert export_file.exists()
         content = export_file.read_text()
         
-        # Should contain header
         assert "EXTRACTED COMMENTS" in content
         
-        # Should contain separators
         assert "=" * 60 in content
         assert "-" * 40 in content
         
-        # Should contain file paths and comments
         assert "file1.py" in content
         assert "file2.js" in content
         assert "First comment" in content
         assert "Second comment" in content
         assert "JavaScript comment" in content
-        # Проверяем извлеченный комментарий (только последняя строка блочного комментария)
         assert "block comment */" in content
 
 

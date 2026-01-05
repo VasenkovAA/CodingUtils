@@ -53,15 +53,12 @@ class GitIgnoreParser:
         should_ignore_result = False
         
         for pattern in self.patterns:
-            # Handle negation patterns
             if pattern.startswith('!'):
                 neg_pattern = pattern[1:]
-                # Only apply negation if the pattern matches
                 if self._pattern_matches(path, path_str, neg_pattern):
                     return False
                 continue
             
-            # Check if this pattern matches
             if self._pattern_matches(path, path_str, pattern):
                 should_ignore_result = True
         
@@ -69,30 +66,22 @@ class GitIgnoreParser:
 
     def _pattern_matches(self, path: Path, path_str: str, pattern: str) -> bool:
         """Check if a pattern matches the given path."""
-        # Simple implementation - replace ** with * for fnmatch
-        # This is not perfect but works for basic cases
         if '**' in pattern:
-            # Handle ** patterns simply
             if pattern == '**':
                 return True
-            # Replace **/ with empty and /** with /*
             pattern = pattern.replace('**/', '').replace('/**', '/*')
             if pattern.startswith('**'):
                 pattern = pattern[2:]
         
         if pattern.endswith('/'):
-            # Directory pattern
             dir_pattern = pattern.rstrip('/')
             if path.is_dir() and fnmatch.fnmatch(path_str, dir_pattern):
                 return True
-            # Files inside directory
             if fnmatch.fnmatch(path_str, dir_pattern + '/*'):
                 return True
         else:
-            # File pattern
             if fnmatch.fnmatch(path_str, pattern):
                 return True
-            # Also check just the filename
             if fnmatch.fnmatch(path.name, pattern):
                 return True
         
@@ -219,10 +208,7 @@ class CommentProcessor:
         block_start = self.BLOCK_COMMENT_START.get(ext)
         block_end = self.BLOCK_COMMENT_END.get(ext)
         
-        # Для файлов только с блочными комментариями (CSS, Less, Sass)
         if line_symbol is None and block_start is not None:
-            # Возвращаем пустую строку для line_symbol, чтобы is_comment_line знала,
-            # что нужно искать только блочные комментарии
             return "", block_start, block_end
         
         if line_symbol is None and not self.config.comment_symbols:
@@ -240,7 +226,6 @@ class CommentProcessor:
         """Check if line contains comments and return comment text if found."""
         line = line.rstrip()
         
-        # Обработка блочных комментариев
         if block_start and block_end:
             if not in_block_comment and block_start in line:
                 start_idx = line.find(block_start)
@@ -249,21 +234,17 @@ class CommentProcessor:
                     comment_text = line[start_idx:end_idx]
                     return True, comment_text, False
                 else:
-                    # Начало блочного комментария
                     return True, None, True
             elif in_block_comment:
                 if block_end in line:
                     end_idx = line.find(block_end) + len(block_end)
                     return True, line[:end_idx], False
                 else:
-                    # Продолжение блочного комментария
                     return True, None, True
         
-        # Если нет строчных комментариев (например, CSS)
         if not comment_symbol:
             return False, None, in_block_comment
         
-        # Обработка строчных комментариев
         in_string = False
         string_char = None
         i = 0
