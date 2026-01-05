@@ -50,27 +50,54 @@ class GitIgnoreParser:
             return False
         
         path_str = str(relative_path).replace('\\', '/')
+        should_ignore_result = False
         
         for pattern in self.patterns:
-            if pattern.endswith('/'):
-                dir_pattern = pattern.rstrip('/')
-                if path.is_dir() and fnmatch.fnmatch(path_str, dir_pattern):
-                    return True
-                if fnmatch.fnmatch(path_str, dir_pattern + '/*'):
-                    return True
-            
-            elif pattern.startswith('!'):
+            # Handle negation patterns
+            if pattern.startswith('!'):
                 neg_pattern = pattern[1:]
-                if fnmatch.fnmatch(path_str, neg_pattern):
+                # Only apply negation if the pattern matches
+                if self._pattern_matches(path, path_str, neg_pattern):
                     return False
+                continue
             
-            else:
-                if fnmatch.fnmatch(path_str, pattern):
-                    return True
-                if fnmatch.fnmatch(path_str + '/', pattern + '/*'):
-                    return True
+            # Check if this pattern matches
+            if self._pattern_matches(path, path_str, pattern):
+                should_ignore_result = True
+        
+        return should_ignore_result
+
+    def _pattern_matches(self, path: Path, path_str: str, pattern: str) -> bool:
+        """Check if a pattern matches the given path."""
+        # Simple implementation - replace ** with * for fnmatch
+        # This is not perfect but works for basic cases
+        if '**' in pattern:
+            # Handle ** patterns simply
+            if pattern == '**':
+                return True
+            # Replace **/ with empty and /** with /*
+            pattern = pattern.replace('**/', '').replace('/**', '/*')
+            if pattern.startswith('**'):
+                pattern = pattern[2:]
+        
+        if pattern.endswith('/'):
+            # Directory pattern
+            dir_pattern = pattern.rstrip('/')
+            if path.is_dir() and fnmatch.fnmatch(path_str, dir_pattern):
+                return True
+            # Files inside directory
+            if fnmatch.fnmatch(path_str, dir_pattern + '/*'):
+                return True
+        else:
+            # File pattern
+            if fnmatch.fnmatch(path_str, pattern):
+                return True
+            # Also check just the filename
+            if fnmatch.fnmatch(path.name, pattern):
+                return True
         
         return False
+
 
 
 class CommentProcessor:
@@ -91,7 +118,7 @@ class CommentProcessor:
         '.lua': '--',
         '.sql': '--',
         '.html': '<!--',
-        '.css': '/*',
+        '.css': None,
     }
     
     BLOCK_COMMENT_START = {
@@ -192,7 +219,13 @@ class CommentProcessor:
         block_start = self.BLOCK_COMMENT_START.get(ext)
         block_end = self.BLOCK_COMMENT_END.get(ext)
         
-        if not line_symbol and not self.config.comment_symbols:
+        # Для файлов только с блочными комментариями (CSS, Less, Sass)
+        if line_symbol is None and block_start is not None:
+            # Возвращаем пустую строку для line_symbol, чтобы is_comment_line знала,
+            # что нужно искать только блочные комментарии
+            return "", block_start, block_end
+        
+        if line_symbol is None and not self.config.comment_symbols:
             raise ValueError(
                 f"Cannot determine comment symbol for {file_path}. "
                 f"Use --comment-symbols to specify it manually."
@@ -201,67 +234,65 @@ class CommentProcessor:
         return line_symbol, block_start, block_end
     
     def is_comment_line(self, line: str, comment_symbol: str, 
-                       in_block_comment: bool = False,
-                       block_start: Optional[str] = None,
-                       block_end: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
+                   in_block_comment: bool = False,
+                   block_start: Optional[str] = None,
+                   block_end: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
         """Check if line contains comments and return comment text if found."""
         line = line.rstrip()
         
+        # Обработка блочных комментариев
         if block_start and block_end:
             if not in_block_comment and block_start in line:
+                start_idx = line.find(block_start)
                 if block_end in line:
-                    start_idx = line.find(block_start)
                     end_idx = line.find(block_end) + len(block_end)
                     comment_text = line[start_idx:end_idx]
                     return True, comment_text, False
                 else:
+                    # Начало блочного комментария
                     return True, None, True
             elif in_block_comment:
                 if block_end in line:
                     end_idx = line.find(block_end) + len(block_end)
                     return True, line[:end_idx], False
                 else:
+                    # Продолжение блочного комментария
                     return True, None, True
         
-        stripped = line.lstrip()
-        if stripped.startswith(comment_symbol):
-            comment_text = stripped[len(comment_symbol):].lstrip()
-            
-            if self.config.exclude_pattern and stripped.startswith(self.config.exclude_pattern):
-                return False, None, False
-            return True, comment_text, False
+        # Если нет строчных комментариев (например, CSS)
+        if not comment_symbol:
+            return False, None, in_block_comment
         
-        if comment_symbol in line:
-            in_string = False
-            string_char = None
-            escaped = False
+        # Обработка строчных комментариев
+        in_string = False
+        string_char = None
+        i = 0
+        
+        while i < len(line):
+            char = line[i]
             
-            for i, char in enumerate(line):
-                if escaped:
-                    escaped = False
-                    continue
-                    
-                if char == '\\':
-                    escaped = True
-                    continue
-                    
-                if char in ['"', "'"]:
-                    if not in_string:
-                        in_string = True
-                        string_char = char
-                    elif string_char == char:
-                        in_string = False
-                        string_char = None
-                    continue
+            if char == '\\' and i + 1 < len(line):
+                i += 2
+                continue
+
+            if char in ['"', "'"]:
+                if not in_string:
+                    in_string = True
+                    string_char = char
+                elif string_char == char:
+                    in_string = False
+                    string_char = None
+
+            if not in_string and line[i:].startswith(comment_symbol):
+                comment_text = line[i + len(comment_symbol):].lstrip()
                 
-                if not in_string and line[i:].startswith(comment_symbol):
-                    comment_text = line[i + len(comment_symbol):].lstrip()
-                    
-                    if self.config.exclude_pattern and line[i:].startswith(self.config.exclude_pattern):
-                        return False, None, False
-                    return True, comment_text, False
+                if self.config.exclude_pattern and line[i:].startswith(self.config.exclude_pattern):
+                    return False, None, in_block_comment
+                return True, comment_text, in_block_comment
+            
+            i += 1
         
-        return False, None, False
+        return False, None, in_block_comment
     
     def should_remove_comment(self, comment_text: str) -> bool:
         """Check if comment should be removed based on language settings."""
@@ -577,7 +608,7 @@ def main():
     )
     
     parser.add_argument(
-        '-ep', '--exclude-pattern',
+        '-ep', '--exclude-path-pattern',
         action='append',
         dest='exclude_patterns',
         help='Exclude by pattern (can be used multiple times, supports wildcards)'
