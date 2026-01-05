@@ -9,7 +9,7 @@ import sys
 import re
 from pathlib import Path
 from typing import List, Optional, Set
-
+import re
 
 class GitIgnoreParser:
     """Parse and apply .gitignore patterns."""
@@ -66,25 +66,48 @@ class GitIgnoreParser:
     
     def _convert_to_regex(self, pattern: str) -> re.Pattern:
         """Convert gitignore pattern to regex."""
-        pattern = re.escape(pattern)
+        if pattern.startswith('/'):
+            pattern = pattern[1:]
         
-        pattern = pattern.replace(r'\*', '.*')
-        pattern = pattern.replace(r'\?', '.')
+        is_dir_pattern = pattern.endswith('/')
+        if is_dir_pattern:
+            pattern = pattern.rstrip('/')
         
-        pattern = pattern.replace(r'\/', '/')
+        regex_chars = r'.^$+{}[]|()\\'
+        result = []
+        i = 0
         
-        pattern = pattern.replace(r'\*\*', '.*')
+        while i < len(pattern):
+            char = pattern[i]
+            
+            if char == '*':
+                if i + 1 < len(pattern) and pattern[i + 1] == '*':
+                    result.append('.*')
+                    i += 2
+                else:
+                    result.append('[^/]*')
+                    i += 1
+            elif char == '?':
+                result.append('[^/]')
+                i += 1
+            elif char in regex_chars:
+                result.append('\\' + char)
+                i += 1
+            else:
+                result.append(char)
+                i += 1
         
-        if pattern.startswith('.*'):
-            pattern = '^' + pattern
-        else:
-            pattern = r'(^|/)' + pattern
+        regex_str = ''.join(result)
         
-        if not pattern.endswith('.*'):
-            pattern += r'($|/)'
+        if not pattern.startswith('*') and not pattern.startswith('**'):
+            regex_str = r'(^|/)' + regex_str
         
-        return re.compile(pattern)
-
+        if is_dir_pattern:
+            regex_str += r'(/|$)'
+        elif not pattern.endswith('*'):
+            regex_str += r'($|/)'
+        
+        return re.compile(regex_str)
 
 class FileMerger:
     """Merge multiple files into one with headers."""
