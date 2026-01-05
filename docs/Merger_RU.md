@@ -367,10 +367,10 @@ file-merger -d /etc -r \
    ```bash
    # Проверьте текущую директорию
    pwd
-   
+
    # Проверьте существование файлов
    ls -la
-   
+
    # Используйте рекурсивный поиск
    file-merger -r
    ```
@@ -379,7 +379,7 @@ file-merger -d /etc -r \
    ```bash
    # Используйте абсолютный путь
    file-merger -d /absolute/path/to/dir
-   
+
    # Или проверьте относительный путь
    file-merger -d ./relative/path
    ```
@@ -392,7 +392,7 @@ file-merger -d /etc -r \
    ```bash
    # Используйте preview для отладки
    file-merger --preview -ed suspicious_dir
-   
+
    # Проверьте чувствительность к регистру
    file-merger -en "*[Tt]emp*"
    ```
@@ -417,7 +417,7 @@ file-merger --preview -ed first_filter -en second_filter
    ```bash
    # Вместо
    file-merger -r
-   
+
    # Используйте
    file-merger -r -p "*.py" -p "*.js" -p "*.html"
    ```
@@ -470,4 +470,3 @@ file-merger --preview -ed first_filter -en second_filter
 3. **Именуйте выходные файлы** с датой для отслеживания версий
 4. **Комбинируйте фильтры** для точного контроля над включаемыми файлами
 5. **Используйте `.gitignore`** для согласованных исключений в команде
-

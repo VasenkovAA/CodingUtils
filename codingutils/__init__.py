@@ -1,5 +1,5 @@
 """
-CodingUtils - A comprehensive set of Python utilities for code analysis, 
+CodingUtils - A comprehensive set of Python utilities for code analysis,
 file management, and project documentation.
 """
 
@@ -13,7 +13,7 @@ __email__ = "NoN"
 
 __all__ = [
     "CommentProcessor",
-    "FileMerger", 
+    "FileMerger",
     "ProjectMapper",
     "comment_extractor_main",
     "merger_main",
