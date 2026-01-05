@@ -680,4 +680,3 @@ comment-extractor -d . \
 # Или используйте языковую фильтрацию
 comment-extractor -d . -l "en" --preview
 ```
-

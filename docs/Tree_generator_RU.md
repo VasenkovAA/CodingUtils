@@ -428,7 +428,7 @@ file-merger -d src -r -p "*.py" -ig -o source_code.txt
    ```bash
    # Быстрый просмотр
    tree-generator --max-depth 2
-   
+
    # Полный анализ
    tree-generator --max-depth 5
    ```
@@ -442,7 +442,7 @@ file-merger -d src -r -p "*.py" -ig -o source_code.txt
    ```bash
    # Вместо
    tree-generator
-   
+
    # Используйте
    tree-generator -p "*.py" -p "*.js" -p "*.html"
    ```
@@ -557,4 +557,3 @@ tree-generator \
   -en "*.min.css" \
   --max-depth 4
 ```
-
