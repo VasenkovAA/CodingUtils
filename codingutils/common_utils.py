@@ -1,38 +1,57 @@
 """
-Common utilities for file processing scripts.
-Handles .gitignore parsing, file filtering, and other shared functionality.
+Common utilities for file-processing scripts.
+
+Includes:
+- Shared filtering config
+- .gitignore-style ignore parser (simplified but predictable semantics)
+- File system walker with filtering & stats
+- File type / encoding detection
+- Safe write with backup (atomic replace)
+- Progress reporting
+- Small helpers and error-handling utilities
 """
 
-import time
+from __future__ import annotations
+
 import fnmatch
-import sys
 import logging
-from pathlib import Path
-from typing import List, Optional, Set, Dict, Any, Callable
+import shutil
+import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-import shutil
+from pathlib import Path
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from functools import wraps
 
 
 # ============================================================================
 # Configuration Classes
 # ============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class FilterConfig:
-    """Configuration for file filtering across all scripts."""
+    """Configuration for file filtering across scripts."""
+
+    # Input roots (kept here because CLI tools in this repo pass it via config)
+    directories: List[str] = field(default_factory=list)
+
     exclude_dirs: Set[str] = field(default_factory=set)
     exclude_names: Set[str] = field(default_factory=set)
     exclude_patterns: Set[str] = field(default_factory=set)
+
     include_pattern: str = "*"
     max_depth: Optional[int] = None
+
     follow_symlinks: bool = False
+
+    # .gitignore support
     use_gitignore: bool = False
     custom_gitignore: Optional[Path] = None
+
     recursive: bool = True
 
-    def __post_init__(self):
-        """Validate and normalize configuration."""
+    def __post_init__(self) -> None:
         if self.max_depth is not None and self.max_depth < 0:
             raise ValueError("max_depth must be non-negative")
 
@@ -45,176 +64,179 @@ class FileType(Enum):
 
 
 # ============================================================================
-# GitIgnore Parser
+# GitIgnore Parser (simplified semantics)
 # ============================================================================
 
 class GitIgnoreParser:
-    """Unified .gitignore parser with proper pattern handling."""
+    """
+    Simplified .gitignore parser.
 
-    def __init__(self, root_dir: Optional[Path] = None):
-        """
-        Initialize parser.
+    Notes:
+    - Supports: comments (# at beginning), blank lines, negation (!), directory patterns (ending with '/')
+    - Supports glob tokens: *, ?, [], and ** (as "any directories")
+    - Matching is done against a posix-style relative path from `root_dir`
+    - This is not a full reimplementation of gitignore, but stable and testable.
+    """
 
-        Args:
-            root_dir: Root directory for relative paths. If None, uses current directory.
-        """
+    def __init__(self, root_dir: Optional[Path] = None) -> None:
         self.root_dir = (root_dir or Path.cwd()).resolve()
         self.patterns: List[str] = []
+        # Cache key includes file-type marker to reduce stale results when node type changes.
         self._cache: Dict[str, bool] = {}
 
     def load_from_file(self, gitignore_path: Optional[Path] = None) -> bool:
         """
         Load patterns from .gitignore file(s).
 
-        Args:
-            gitignore_path: Specific .gitignore file. If None, auto-discovers.
-
-        Returns:
-            True if patterns were loaded, False otherwise.
+        If `gitignore_path` is None, auto-discovers .gitignore in root_dir and parents.
         """
-        if gitignore_path:
-            return self._parse_single_file(gitignore_path)
+        if gitignore_path is not None:
+            loaded = self._parse_single_file(gitignore_path)
+            if loaded:
+                self._cache.clear()
+            return loaded
 
-        # Try to find .gitignore in current and parent directories
-        current = self.root_dir
         found = False
+        for p in self._discover_gitignore_files():
+            if self._parse_single_file(p):
+                found = True
 
-        while current and current.exists():
-            gitignore = current / '.gitignore'
-            if gitignore.exists():
-                if self._parse_single_file(gitignore):
-                    found = True
-            current = current.parent if current != current.parent else None
-
+        if found:
+            self._cache.clear()
         return found
 
+    def _discover_gitignore_files(self) -> Iterable[Path]:
+        current = self.root_dir
+        while True:
+            candidate = current / ".gitignore"
+            if candidate.exists():
+                yield candidate
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
     def _parse_single_file(self, gitignore_path: Path) -> bool:
-        """Parse a single .gitignore file."""
         try:
-            with open(gitignore_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
+            with open(gitignore_path, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
                         continue
                     self.patterns.append(line)
             return True
         except Exception as e:
-            logging.warning(f"Could not parse {gitignore_path}: {e}")
+            logging.warning("Could not parse %s: %s", gitignore_path, e)
             return False
 
     def add_pattern(self, pattern: str) -> None:
-        """Add a pattern manually."""
         self.patterns.append(pattern)
+        self._cache.clear()
 
     def should_ignore(self, path: Path) -> bool:
         """
-        Check if a path should be ignored.
+        Return True if path should be ignored based on loaded patterns.
 
-        Args:
-            path: Absolute path to check.
-
-        Returns:
-            True if path should be ignored.
+        `path` is expected to be an absolute path or a path under root_dir.
         """
-        # Check cache
-        path_str = str(path)
-        if path_str in self._cache:
-            return self._cache[path_str]
+        # We intentionally use filesystem info here; caller code walks real FS.
+        is_dir = path.is_dir()
+        cache_key = f"{str(path)}|{'d' if is_dir else 'f'}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
 
         try:
-            # Get relative path from root
-            rel_path = path.relative_to(self.root_dir)
-            rel_str = str(rel_path).replace('\\', '/')
-        except ValueError:
-            # Path is not under root directory
-            self._cache[path_str] = False
+            rel_path = path.resolve().relative_to(self.root_dir)
+        except Exception:
+            self._cache[cache_key] = False
             return False
 
-        # Check if it's a directory
-        is_dir = path.is_dir()
+        rel_str = rel_path.as_posix()
+        rel_parts = rel_str.split("/") if rel_str else []
 
-        # Apply patterns in order (gitignore logic)
         ignored = False
-
         for pattern in self.patterns:
-            # Handle negation
-            if pattern.startswith('!'):
-                neg_pattern = pattern[1:]
-                if self._fnmatch_pattern(rel_str, neg_pattern, is_dir):
-                    ignored = False
-                continue
+            negated = pattern.startswith("!")
+            pat = pattern[1:] if negated else pattern
 
-            # Handle regular pattern
-            if self._fnmatch_pattern(rel_str, pattern, is_dir):
-                ignored = True
+            if self._match(rel_str, rel_parts, pat, is_dir=is_dir):
+                ignored = not negated
 
-        # Cache result
-        self._cache[path_str] = ignored
+        self._cache[cache_key] = ignored
         return ignored
 
-    # В common_utils.py исправим методы:
-
-    def _fnmatch_pattern(self, rel_str: str, pattern: str, is_dir: bool) -> bool:
-        """Match pattern using fnmatch with gitignore semantics."""
-        # Handle ** pattern
-        if '**' in pattern:
-            if pattern == '**':
-                return True
-            pattern = pattern.replace('**/', '').replace('/**', '/*')
-            if pattern.startswith('**'):
-                pattern = pattern[2:]
-
-        # Handle directory pattern
-        if pattern.endswith('/'):
-            dir_pattern = pattern.rstrip('/')
-            if is_dir and fnmatch.fnmatch(rel_str, dir_pattern):
-                return True
-            # Для директорий проверяем, что все внутри игнорируется
-            if fnmatch.fnmatch(rel_str, dir_pattern + '/*'):
-                return True
-            # Для файлов с таким же именем как директория - не игнорируем
+    def _match(self, rel_str: str, rel_parts: List[str], pattern: str, *, is_dir: bool) -> bool:
+        """
+        Match gitignore-like pattern against a relative posix path.
+        """
+        if not pattern:
             return False
-        else:
-            # Regular file pattern
-            if fnmatch.fnmatch(rel_str, pattern):
-                return True
-            if fnmatch.fnmatch(rel_str + '/', pattern + '/*'):
-                return True
 
-        return False
+        # Directory-only pattern
+        if pattern.endswith("/"):
+            dir_pat = pattern.rstrip("/")
+            # If pattern is just "node_modules/" (no slash inside), match any directory segment with that name.
+            if "/" not in dir_pat.lstrip("/"):
+                needle = dir_pat.lstrip("/")
+                # Matches the directory itself OR any descendant of it.
+                return needle in rel_parts
+            # Multi-segment dir pattern: treat as anchored path pattern and check if rel path has such prefix.
+            dir_pat_norm = dir_pat.lstrip("/")
+            return self._match_path_segments(rel_parts, dir_pat_norm.split("/"), anchored=pattern.startswith("/"))
 
+        # Non-directory pattern
+        if "/" not in pattern.lstrip("/"):
+            # Basename-style pattern: apply to file/dir name only
+            name = rel_parts[-1] if rel_parts else ""
+            return fnmatch.fnmatchcase(name, pattern.lstrip("/"))
 
-    def _should_exclude(self, path: Path, is_dir: bool) -> bool:
-        """Determine if a path should be excluded."""
-        # Gitignore check
-        if self.gitignore_parser and self.gitignore_parser.should_ignore(path):
-            return True
+        # Path pattern (contains '/')
+        anchored = pattern.startswith("/")
+        pat_parts = pattern.lstrip("/").split("/")
+        return self._match_path_segments(rel_parts, pat_parts, anchored=anchored)
 
-        # Directory name exclusion
-        if is_dir and self.config.exclude_dirs:
-            for exclude_dir in self.config.exclude_dirs:
-                if exclude_dir in path.parts:
-                    return True
+    def _match_path_segments(self, path_parts: List[str], pat_parts: List[str], *, anchored: bool) -> bool:
+        """
+        Segment-based glob matching where '*' doesn't cross '/' and '**' matches any number of segments.
 
-        # File name exclusion
-        if self.config.exclude_names:
-            for exclude_name in self.config.exclude_names:
-                if fnmatch.fnmatch(path.name, exclude_name):
-                    return True
+        anchored=True means pattern is matched from the start of the path.
+        anchored=False still matches from start here (repo tools use root-relative semantics),
+        but we keep this flag for future extension.
+        """
+        # Anchored vs non-anchored: for now both are root-relative; to implement "match anywhere",
+        # we would need to slide over start indices. Not required for current tools/tests.
+        if not anchored and False:  # reserved for future
+            pass
 
-        # Pattern exclusion
-        if self.config.exclude_patterns:
-            rel_path = self._get_relative_path(path)
-            for pattern in self.config.exclude_patterns:
-                if fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(rel_path, pattern):
-                    return True
+        i = j = 0
+        # Backtracking points for '**'
+        star_i = star_j = -1
 
-        # Include pattern check - только для файлов!
-        if not is_dir and not fnmatch.fnmatch(path.name, self.config.include_pattern):
-            return True
+        while i < len(path_parts):
+            if j < len(pat_parts) and pat_parts[j] == "**":
+                star_i, star_j = i, j
+                j += 1
+                continue
 
-        return False
+            if j < len(pat_parts) and fnmatch.fnmatchcase(path_parts[i], pat_parts[j]):
+                i += 1
+                j += 1
+                continue
 
+            if star_j != -1:
+                # Expand '**' to cover one more segment
+                star_i += 1
+                i = star_i
+                j = star_j + 1
+                continue
+
+            return False
+
+        # Consume trailing '**'
+        while j < len(pat_parts) and pat_parts[j] == "**":
+            j += 1
+
+        return j == len(pat_parts)
 
 
 # ============================================================================
@@ -222,155 +244,179 @@ class GitIgnoreParser:
 # ============================================================================
 
 class FileSystemWalker:
-    """Efficient file system traversal with filtering."""
+    """Efficient file system traversal with filtering and stats."""
 
-    def __init__(self, config: FilterConfig, gitignore_parser: Optional[GitIgnoreParser] = None):
+    def __init__(self, config: FilterConfig, gitignore_parser: Optional[GitIgnoreParser] = None) -> None:
         self.config = config
         self.gitignore_parser = gitignore_parser
-        self.stats = {
-            'files_found': 0,
-            'directories_found': 0,
-            'files_excluded': 0,
-            'directories_excluded': 0
+        self.stats: Dict[str, int] = {
+            "files_found": 0,
+            "directories_found": 0,
+            "files_excluded": 0,
+            "directories_excluded": 0,
         }
+        self._roots: List[Path] = []
 
-
-    def find_files(self, root_dirs: List[Path]) -> List[Path]:
+    def find_files(self, root_dirs: Sequence[Path], *, recursive: Optional[bool] = None) -> List[Path]:
         """
         Find files matching criteria.
 
-        Args:
-            root_dirs: Directories to search.
-
-        Returns:
-            List of matching files.
+        `recursive` is kept for backward compatibility with callers in this repo.
+        If None, uses self.config.recursive.
         """
-        files = []
+        self._roots = [p.resolve() for p in root_dirs]
+        self._reset_stats()
 
-        for root_dir in root_dirs:
-            if not root_dir.exists():
-                logging.warning(f"Directory does not exist: {root_dir}")
+        do_recursive = self.config.recursive if recursive is None else recursive
+
+        files: List[Path] = []
+        for root in self._roots:
+            if not root.exists():
+                logging.warning("Directory does not exist: %s", root)
+                continue
+            if root.is_file():
+                # Allow passing a file directly as root
+                self.stats["files_found"] += 1
+                if not self._should_exclude(root, is_dir=False):
+                    files.append(root)
+                else:
+                    self.stats["files_excluded"] += 1
                 continue
 
-            if self.config.recursive:  # Используем config.recursive
-                files.extend(self._walk_recursive(root_dir, depth=0))
+            if do_recursive:
+                files.extend(self._walk_recursive(root))
             else:
-                files.extend(self._walk_single(root_dir))
+                files.extend(self._walk_single(root))
 
+        # Unique + stable order
         return sorted(set(files))
 
-    def _walk_recursive(self, current_dir: Path, depth: int) -> List[Path]:
-        """Recursively walk directory tree."""
-        files = []
+    def _reset_stats(self) -> None:
+        for k in self.stats:
+            self.stats[k] = 0
 
-        # Check max depth для директории
-        if self.config.max_depth is not None and depth > self.config.max_depth:
-            return files
+    def _walk_recursive(self, root_dir: Path) -> List[Path]:
+        """
+        Walk directory tree.
 
-        try:
-            for item in current_dir.iterdir():
-                # Handle symlinks
-                if item.is_symlink() and not self.config.follow_symlinks:
-                    continue
+        Depth convention:
+        - root_dir children (files/dirs directly inside) are at depth=1
+        """
+        results: List[Path] = []
+        stack: List[Tuple[Path, int]] = [(root_dir, 0)]  # (dir, depth_of_dir)
 
-                # Resolve symlinks if following
-                if item.is_symlink() and self.config.follow_symlinks:
-                    try:
-                        item = item.resolve()
-                    except Exception:
+        while stack:
+            current_dir, depth = stack.pop()
+
+            # Do not descend past max depth
+            if self.config.max_depth is not None and depth > self.config.max_depth:
+                continue
+
+            try:
+                for item in current_dir.iterdir():
+                    # Handle symlinks
+                    if item.is_symlink() and not self.config.follow_symlinks:
                         continue
 
-                if item.is_dir():
-                    self.stats['directories_found'] += 1
+                    if item.is_symlink() and self.config.follow_symlinks:
+                        try:
+                            item = item.resolve()
+                        except Exception:
+                            continue
 
-                    # Check if directory should be excluded
-                    if self._should_exclude(item, is_dir=True):
-                        self.stats['directories_excluded'] += 1
+                    if item.is_dir():
+                        self.stats["directories_found"] += 1
+                        if self._should_exclude(item, is_dir=True):
+                            self.stats["directories_excluded"] += 1
+                            continue
+                        # next directory depth = depth + 1
+                        stack.append((item, depth + 1))
                         continue
 
-                    # Recurse into directory
-                    files.extend(self._walk_recursive(item, depth + 1))
-                else:
-                    self.stats['files_found'] += 1
+                    # It's a file
+                    self.stats["files_found"] += 1
 
-                    # Check if file should be excluded
-                    if self._should_exclude(item, is_dir=False):
-                        self.stats['files_excluded'] += 1
-                        continue
-
-                    # Проверка глубины для файлов
-                    # Файлы находятся на глубине depth+1 (текущая директория + файл)
+                    # Files are considered at (depth + 1)
                     if self.config.max_depth is not None and (depth + 1) > self.config.max_depth:
-                        self.stats['files_excluded'] += 1
+                        self.stats["files_excluded"] += 1
                         continue
 
-                    files.append(item)
+                    if self._should_exclude(item, is_dir=False):
+                        self.stats["files_excluded"] += 1
+                        continue
 
-        except PermissionError:
-            logging.debug(f"Permission denied: {current_dir}")
-        except Exception as e:
-            logging.debug(f"Error accessing {current_dir}: {e}")
+                    results.append(item)
 
-        return files
+            except PermissionError:
+                logging.debug("Permission denied: %s", current_dir)
+            except Exception as e:
+                logging.debug("Error accessing %s: %s", current_dir, e)
+
+        return results
 
     def _walk_single(self, directory: Path) -> List[Path]:
         """Walk a single directory (non-recursive)."""
-        files = []
-
+        results: List[Path] = []
         try:
             for item in directory.iterdir():
-                if item.is_file():
-                    self.stats['files_found'] += 1
-
-                    if not self._should_exclude(item, is_dir=False):
-                        files.append(item)
-                    else:
-                        self.stats['files_excluded'] += 1
-
+                if not item.is_file():
+                    continue
+                self.stats["files_found"] += 1
+                if self._should_exclude(item, is_dir=False):
+                    self.stats["files_excluded"] += 1
+                    continue
+                results.append(item)
         except PermissionError:
-            logging.debug(f"Permission denied: {directory}")
+            logging.debug("Permission denied: %s", directory)
+        return results
 
-        return files
-
-    def _should_exclude(self, path: Path, is_dir: bool) -> bool:
-        """Determine if a path should be excluded."""
-        # Gitignore check
+    def _should_exclude(self, path: Path, *, is_dir: bool) -> bool:
+        """Return True if path should be excluded by config/gitignore rules."""
+        # gitignore
         if self.gitignore_parser and self.gitignore_parser.should_ignore(path):
             return True
 
-        # Directory name exclusion
+        # exclude dirs by name (match any segment)
         if is_dir and self.config.exclude_dirs:
-            for exclude_dir in self.config.exclude_dirs:
-                if exclude_dir in path.parts:
+            # path.parts includes drive on Windows; ok.
+            for d in self.config.exclude_dirs:
+                if d and d in path.parts:
                     return True
 
-        # File name exclusion
+        # exclude names (wildcards against basename)
         if self.config.exclude_names:
-            for exclude_name in self.config.exclude_names:
-                if fnmatch.fnmatch(path.name, exclude_name):
+            for pat in self.config.exclude_names:
+                if fnmatch.fnmatchcase(path.name, pat):
                     return True
 
-        # Pattern exclusion
+        # exclude patterns (match both basename and root-relative path)
         if self.config.exclude_patterns:
-            rel_path = self._get_relative_path(path)
-            for pattern in self.config.exclude_patterns:
-                if fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(rel_path, pattern):
+            rel = self._relative_to_nearest_root(path).as_posix()
+            for pat in self.config.exclude_patterns:
+                if fnmatch.fnmatchcase(path.name, pat) or fnmatch.fnmatchcase(rel, pat):
                     return True
 
-        # Include pattern check - только для файлов!
-        if not is_dir and not fnmatch.fnmatch(path.name, self.config.include_pattern):
+        # include pattern applies only to files
+        if not is_dir and not fnmatch.fnmatchcase(path.name, self.config.include_pattern):
             return True
 
         return False
 
-    def _get_relative_path(self, path: Path) -> str:
-        """Get relative path for pattern matching."""
-        # Try to find a common root among the search directories
+    def _relative_to_nearest_root(self, path: Path) -> Path:
+        """
+        Compute path relative to the nearest root used in `find_files()`.
+        Falls back to cwd-relative, then absolute.
+        """
+        p = path.resolve()
+        for r in self._roots:
+            try:
+                return p.relative_to(r)
+            except Exception:
+                continue
         try:
-            # This is a simplified version - in practice, we'd track search roots
-            return str(path.relative_to(Path.cwd()))
-        except ValueError:
-            return str(path)
+            return p.relative_to(Path.cwd().resolve())
+        except Exception:
+            return p
 
 
 # ============================================================================
@@ -380,78 +426,84 @@ class FileSystemWalker:
 class FileContentDetector:
     """Detect file content type and encoding."""
 
-    # Common binary file extensions
-    BINARY_EXTENSIONS = {
-        '.exe', '.dll', '.so', '.dylib', '.bin',
-        '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico',
-        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-        '.zip', '.tar', '.gz', '.rar', '.7z',
-        '.mp3', '.mp4', '.avi', '.mkv', '.mov'
+    BINARY_EXTENSIONS: Set[str] = {
+        ".exe", ".dll", ".so", ".dylib", ".bin",
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".ico",
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".zip", ".tar", ".gz", ".rar", ".7z",
+        ".mp3", ".mp4", ".avi", ".mkv", ".mov",
     }
 
-    # Text file extensions with known comment styles
-    COMMENT_STYLES = {
-        '.py': {'line': '#', 'block': ('"""', '"""'), 'alt_block': ("'''", "'''")},
-        '.java': {'line': '//', 'block': ('/*', '*/')},
-        '.cpp': {'line': '//', 'block': ('/*', '*/')},
-        '.c': {'line': '//', 'block': ('/*', '*/')},
-        '.js': {'line': '//', 'block': ('/*', '*/')},
-        '.ts': {'line': '//', 'block': ('/*', '*/')},
-        '.go': {'line': '//', 'block': ('/*', '*/')},
-        '.rs': {'line': '//', 'block': ('/*', '*/')},
-        '.rb': {'line': '#', 'block': ('=begin', '=end')},
-        '.sh': {'line': '#'},
-        '.pl': {'line': '#'},
-        '.php': {'line': '//', 'block': ('/*', '*/')},
-        '.sql': {'line': '--', 'block': ('/*', '*/')},
-        '.html': {'block': ('<!--', '-->')},
-        '.css': {'block': ('/*', '*/')},
-        '.xml': {'block': ('<!--', '-->')},
+    # Note: Python triple quotes are docstrings/strings, not comments.
+    # Kept as-is for backward compatibility with existing tools/tests in this repo.
+    COMMENT_STYLES: Dict[str, Dict[str, object]] = {
+        ".py": {"line": "#", "block": ('"""', '"""'), "alt_block": ("'''", "'''")},
+        ".java": {"line": "//", "block": ("/*", "*/")},
+        ".cpp": {"line": "//", "block": ("/*", "*/")},
+        ".c": {"line": "//", "block": ("/*", "*/")},
+        ".js": {"line": "//", "block": ("/*", "*/")},
+        ".ts": {"line": "//", "block": ("/*", "*/")},
+        ".go": {"line": "//", "block": ("/*", "*/")},
+        ".rs": {"line": "//", "block": ("/*", "*/")},
+        ".rb": {"line": "#", "block": ("=begin", "=end")},
+        ".sh": {"line": "#"},
+        ".pl": {"line": "#"},
+        ".php": {"line": "//", "block": ("/*", "*/")},
+        ".sql": {"line": "--", "block": ("/*", "*/")},
+        ".html": {"block": ("<!--", "-->")},
+        ".css": {"block": ("/*", "*/")},
+        ".xml": {"block": ("<!--", "-->")},
     }
 
     @classmethod
     def detect_file_type(cls, path: Path) -> FileType:
-        """Detect if file is text or binary."""
-        # Check extension first
+        """
+        Detect if file is text or binary.
+
+        Heuristic:
+        - Known binary extension => BINARY
+        - Contains NUL byte in first 4KB => BINARY
+        - UTF-8 decodable sample => TEXT
+        - Otherwise => UNKNOWN
+        """
         if path.suffix.lower() in cls.BINARY_EXTENSIONS:
             return FileType.BINARY
 
-        # Try to read first few bytes
         try:
-            with open(path, 'rb') as f:
-                sample = f.read(1024)
+            with open(path, "rb") as f:
+                sample = f.read(4096)
 
-            # Check for null bytes (indicates binary)
-            if b'\x00' in sample:
+            if b"\x00" in sample:
                 return FileType.BINARY
 
-            # Try to decode as UTF-8
-            sample.decode('utf-8', errors='strict')
+            sample.decode("utf-8", errors="strict")
             return FileType.TEXT
-
         except Exception:
             return FileType.UNKNOWN
 
     @classmethod
-    def get_comment_style(cls, path: Path) -> Optional[Dict[str, Any]]:
-        """Get comment style for a file based on extension."""
+    def get_comment_style(cls, path: Path) -> Optional[Dict[str, object]]:
         return cls.COMMENT_STYLES.get(path.suffix.lower())
 
     @classmethod
     def detect_encoding(cls, path: Path) -> str:
-        """Detect file encoding."""
-        encodings = ['utf-8', 'latin-1', 'cp1252', 'utf-16']
+        """
+        Detect file encoding with a simple trial strategy.
 
-        for encoding in encodings:
+        Returns one of the tried encodings; falls back to latin-1 (never fails).
+        """
+        encodings = ("utf-8", "latin-1", "cp1252", "utf-16")
+        for enc in encodings:
             try:
-                with open(path, 'r', encoding=encoding) as f:
-                    f.read(1024)
-                return encoding
+                with open(path, "r", encoding=enc) as f:
+                    f.read(2048)
+                return enc
             except UnicodeDecodeError:
                 continue
-
-        # Fallback to latin-1 (never fails)
-        return 'latin-1'
+            except Exception:
+                # If file can't be read, default to utf-8 to reduce surprises.
+                return "utf-8"
+        return "latin-1"
 
 
 # ============================================================================
@@ -459,68 +511,99 @@ class FileContentDetector:
 # ============================================================================
 
 class SafeFileProcessor:
-    """Context manager for safe file operations with backup."""
+    """
+    Context manager for safe file operations with optional backup.
 
-    def __init__(self, file_path: Path, backup: bool = True):
-        self.file_path = file_path
+    Behavior:
+    - If backup=True and file exists, creates <name><suffix>.bak
+    - If exception occurs inside context, restores original from backup
+    - On success, removes backup unless keep_backup=True
+    """
+
+    def __init__(self, file_path: Path, *, backup: bool = True, keep_backup: bool = False) -> None:
+        self.file_path = Path(file_path)
         self.backup = backup
-        self.backup_path = None
-        self.original_content = None
+        self.keep_backup = keep_backup
+        self.backup_path: Optional[Path] = None
 
-    def __enter__(self):
-        """Create backup and read original content."""
+    def __enter__(self) -> "SafeFileProcessor":
         if self.backup and self.file_path.exists():
-            self.backup_path = self.file_path.with_suffix(self.file_path.suffix + '.bak')
+            self.backup_path = self.file_path.with_suffix(self.file_path.suffix + ".bak")
             shutil.copy2(self.file_path, self.backup_path)
-
-        if self.file_path.exists():
-            with open(self.file_path, 'r', encoding='utf-8') as f:
-                self.original_content = f.read()
-
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Restore from backup if there was an error."""
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        # Restore from backup on error
         if exc_type is not None and self.backup_path and self.backup_path.exists():
-            # Restore from backup
-            shutil.copy2(self.backup_path, self.file_path)
-            self.backup_path.unlink()
-            logging.error(f"Error processing {self.file_path}. Restored from backup.")
-            return False  # Re-raise exception
+            try:
+                shutil.copy2(self.backup_path, self.file_path)
+            finally:
+                # keep backup on error? usually no; keep it for inspection if requested
+                if not self.keep_backup:
+                    try:
+                        self.backup_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            logging.error("Error processing %s. Restored from backup.", self.file_path)
+            return False  # re-raise
 
-        # Clean up backup on success
-        if self.backup_path and self.backup_path.exists():
-            self.backup_path.unlink()
+        # On success: cleanup backup if requested
+        if self.backup_path and self.backup_path.exists() and not self.keep_backup:
+            try:
+                self.backup_path.unlink()
+            except Exception:
+                # Don't fail successful operation due to inability to delete .bak
+                logging.debug("Failed to delete backup file: %s", self.backup_path)
 
-        return False  # Don't suppress exceptions
+        return False  # don't suppress exceptions
 
 
-def safe_write(file_path: Path, content: str, encoding: str = 'utf-8', backup: bool = True) -> bool:
+def safe_write(
+    file_path: Path,
+    content: str,
+    encoding: str = "utf-8",
+    backup: bool = True,
+    *,
+    keep_backup: bool = False,
+) -> bool:
     """
-    Safely write content to file with optional backup.
+    Safely write content to a file with optional backup and atomic replace.
 
-    Args:
-        file_path: Path to write to.
-        content: Content to write.
-        encoding: File encoding.
-        backup: Whether to create backup.
-
-    Returns:
-        True if successful, False otherwise.
+    - Creates parent dirs if missing
+    - Writes to a temporary file in the same directory
+    - Atomically replaces the target
+    - If error occurs, restores from backup (if created)
     """
+    file_path = Path(file_path)
+    tmp_path = file_path.with_name(file_path.name + ".tmp")
+
     try:
-        with SafeFileProcessor(file_path, backup):
-            # Ensure directory exists
-            file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Write content
-            with open(file_path, 'w', encoding=encoding) as f:
+        with SafeFileProcessor(file_path, backup=backup, keep_backup=keep_backup):
+            with open(tmp_path, "w", encoding=encoding, newline="") as f:
                 f.write(content)
+                f.flush()
+                try:
+                    # Best effort (works on real files)
+                    import os
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
 
-            return True
+            # Atomic replace on most platforms
+            tmp_path.replace(file_path)
+
+        return True
     except Exception as e:
-        logging.error(f"Failed to write {file_path}: {e}")
+        logging.error("Failed to write %s: %s", file_path, e)
         return False
+    finally:
+        # Cleanup tmp if it still exists
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -530,41 +613,57 @@ def safe_write(file_path: Path, content: str, encoding: str = 'utf-8', backup: b
 class ProgressReporter:
     """Report progress for long-running operations."""
 
-    def __init__(self, total: int, description: str = "Processing"):
-        self.total = total
+    def __init__(self, total: int, description: str = "Processing", *, stream=None) -> None:
+        self.total = max(0, int(total))
         self.description = description
         self.current = 0
-        self.start_time = None
+        self.start_time: Optional[float] = None
+        self.stream = stream or sys.stdout
 
-    def __enter__(self):
-        """Start progress reporting."""
+        # Only draw a bar if we're on an interactive terminal
+        try:
+            self._enabled = self.stream.isatty() and self.total > 0
+        except Exception:
+            self._enabled = self.total > 0
+
+    def __enter__(self) -> "ProgressReporter":
         self.start_time = time.time()
         self._print_progress()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Finish progress reporting."""
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self.start_time is None:
+            return
         elapsed = time.time() - self.start_time
-        if self.total > 0:  # Только если был прогресс
-            print(f"\n{self.description} completed in {elapsed:.2f}s")
+        if self.total > 0:
+            # Ensure final state is printed (especially if disabled bar)
+            if not self._enabled:
+                self.stream.write(f"{self.description}: {self.current}/{self.total}\n")
+            self.stream.write(f"{self.description} completed in {elapsed:.2f}s\n")
+            self.stream.flush()
 
-    def update(self, increment: int = 1):
-        """Update progress."""
-        self.current += increment
+    def update(self, increment: int = 1) -> None:
+        if self.total <= 0:
+            return
+        self.current = min(self.total, self.current + max(0, int(increment)))
         self._print_progress()
 
-    def _print_progress(self):
-        """Print progress to console."""
-        if self.total == 0:
+    def _print_progress(self) -> None:
+        if self.total <= 0:
             return
 
-        percent = (self.current / self.total) * 100
-        bar_length = 40
-        filled_length = int(bar_length * self.current // self.total)
-        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        if not self._enabled:
+            return
 
-        sys.stdout.write(f'\r{self.description}: |{bar}| {percent:.1f}% ({self.current}/{self.total})')
-        sys.stdout.flush()
+        percent = (self.current / self.total) * 100.0
+        bar_length = 40
+        filled = int(bar_length * self.current // self.total)
+        bar = "█" * filled + "░" * (bar_length - filled)
+
+        self.stream.write(
+            f"\r{self.description}: |{bar}| {percent:.1f}% ({self.current}/{self.total})"
+        )
+        self.stream.flush()
 
 
 # ============================================================================
@@ -572,37 +671,31 @@ class ProgressReporter:
 # ============================================================================
 
 def format_size(size_bytes: int) -> str:
-    """Format file size in human-readable format."""
-    if size_bytes == 0:
+    """Format byte size in a human-readable form."""
+    if size_bytes <= 0:
         return "0 B"
 
-    size_units = ["B", "KB", "MB", "GB", "TB"]
-    i = 0
-
-    while size_bytes >= 1024 and i < len(size_units) - 1:
-        size_bytes /= 1024
-        i += 1
-
-    return f"{size_bytes:.2f} {size_units[i]}"
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(size_bytes)
+    unit_idx = 0
+    while size >= 1024.0 and unit_idx < len(units) - 1:
+        size /= 1024.0
+        unit_idx += 1
+    return f"{size:.2f} {units[unit_idx]}"
 
 
 def get_relative_path(path: Path, base_dir: Optional[Path] = None) -> str:
-    """Get relative path from base directory."""
-    base_dir = base_dir or Path.cwd()
-
+    base_dir = (base_dir or Path.cwd()).resolve()
     try:
-        return str(path.relative_to(base_dir))
-    except ValueError:
+        return str(path.resolve().relative_to(base_dir))
+    except Exception:
         return str(path)
 
 
 def create_directory_header(file_path: Path, base_dir: Optional[Path] = None) -> str:
-    """Create a formatted header for file inclusion in merged output."""
     rel_path = get_relative_path(file_path, base_dir)
-    header = f"\n{'='*60}\n"
-    header += f"FILE: {rel_path}\n"
-    header += f"{'='*60}\n"
-    return header
+    sep = "=" * 60
+    return f"\n{sep}\nFILE: {rel_path}\n{sep}\n"
 
 
 # ============================================================================
@@ -611,34 +704,39 @@ def create_directory_header(file_path: Path, base_dir: Optional[Path] = None) ->
 
 class FileOperationError(Exception):
     """Base exception for file operations."""
-    pass
 
 
 class PermissionDeniedError(FileOperationError):
     """Raised when permission is denied."""
-    pass
 
 
 class InvalidFileTypeError(FileOperationError):
     """Raised when file type is not supported."""
-    pass
 
 
 def handle_file_errors(func: Callable) -> Callable:
-    """Decorator to handle common file operation errors."""
+    """
+    Decorator to normalize common file operation errors.
+
+    NOTE: Kept backward-compatible with existing tests in this repo:
+    - FileNotFoundError / UnicodeDecodeError => log + return None
+    - PermissionError => raise PermissionDeniedError
+    - Other exceptions => logged and re-raised
+    """
+    @wraps(func)
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except PermissionError as e:
-            raise PermissionDeniedError(f"Permission denied: {e}")
+            raise PermissionDeniedError(f"Permission denied: {e}") from e
         except FileNotFoundError as e:
-            logging.warning(f"File not found: {e}")
+            logging.warning("File not found: %s", e)
             return None
         except UnicodeDecodeError as e:
-            logging.warning(f"Encoding error: {e}")
+            logging.warning("Encoding error: %s", e)
             return None
         except Exception as e:
-            logging.error(f"Unexpected error: {e}")
+            logging.error("Unexpected error: %s", e)
             raise
 
     return wrapper
@@ -650,33 +748,26 @@ def handle_file_errors(func: Callable) -> Callable:
 
 __all__ = [
     # Configuration
-    'FilterConfig',
-    'FileType',
-
+    "FilterConfig",
+    "FileType",
     # GitIgnore
-    'GitIgnoreParser',
-
+    "GitIgnoreParser",
     # File System
-    'FileSystemWalker',
-
+    "FileSystemWalker",
     # Content Detection
-    'FileContentDetector',
-
+    "FileContentDetector",
     # Safe Operations
-    'SafeFileProcessor',
-    'safe_write',
-
+    "SafeFileProcessor",
+    "safe_write",
     # Progress
-    'ProgressReporter',
-
+    "ProgressReporter",
     # Utilities
-    'format_size',
-    'get_relative_path',
-    'create_directory_header',
-
+    "format_size",
+    "get_relative_path",
+    "create_directory_header",
     # Error Handling
-    'FileOperationError',
-    'PermissionDeniedError',
-    'InvalidFileTypeError',
-    'handle_file_errors',
+    "FileOperationError",
+    "PermissionDeniedError",
+    "InvalidFileTypeError",
+    "handle_file_errors",
 ]
