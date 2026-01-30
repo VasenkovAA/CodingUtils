@@ -34,35 +34,29 @@ from codingutils.common_utils import (
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# Configuration
-# ============================================================================
 
 @dataclass(slots=True)
 class TreeConfig(FilterConfig):
-    # Output
     output_file: Optional[Path] = None
-    format: str = "text"  # text, json, xml, markdown
+    format: str = "text"
     log_file: Optional[Path] = None
     verbose: bool = False
 
-    # Display
     show_size: bool = False
     show_permissions: bool = False
     show_last_modified: bool = False
     show_file_type: bool = False
     show_hidden: bool = False
 
-    # Sorting
-    sort_by: str = "name"  # name, size, modified, type
+    sort_by: str = "name"
     sort_reverse: bool = False
 
-    # Layout (ASCII)
-    indent_style: str = "tree"  # tree, spaces, dashes
-    indent_size: int = 4
-    max_width: Optional[int] = None  # truncate with "..."
 
-    # Extras
+    indent_style: str = "tree"
+    indent_size: int = 4
+    max_width: Optional[int] = None
+
+
     include_statistics: bool = True
     include_summary: bool = True
     exclude_empty_dirs: bool = False
@@ -75,7 +69,7 @@ class TreeConfig(FilterConfig):
     })
 
     def __post_init__(self) -> None:
-        # robust base call
+
         FilterConfig.__post_init__(self)
 
         if self.format not in {"text", "json", "xml", "markdown"}:
@@ -91,10 +85,6 @@ class TreeConfig(FilterConfig):
             raise ValueError("indent_size must be non-negative")
 
 
-# ============================================================================
-# Model
-# ============================================================================
-
 @dataclass(slots=True)
 class TreeNode:
     name: str
@@ -109,10 +99,6 @@ class TreeNode:
 
     is_symlink: bool = False
 
-
-# ============================================================================
-# Filtering
-# ============================================================================
 
 class NodeFilter:
     """
@@ -136,7 +122,7 @@ class NodeFilter:
             return path.as_posix()
 
     def is_hidden_path(self, path: Path) -> bool:
-        # "hidden" if any segment under root starts with '.'
+
         try:
             rel = path.resolve().relative_to(self.root)
             parts = rel.parts
@@ -147,15 +133,15 @@ class NodeFilter:
     def should_include(self, path: Path, *, is_dir: bool) -> bool:
         cfg = self.config
 
-        # hidden handling
+
         if not cfg.show_hidden and self.is_hidden_path(path):
             return False
 
-        # gitignore
+
         if self.gitignore is not None and self.gitignore.should_ignore(path):
             return False
 
-        # exclude_dirs: match any segment name (relative to root)
+
         if is_dir and cfg.exclude_dirs:
             try:
                 rel_parts = path.resolve().relative_to(self.root).parts
@@ -164,35 +150,35 @@ class NodeFilter:
             if any(seg in cfg.exclude_dirs for seg in rel_parts):
                 return False
 
-        # exclude_names: glob against basename
+
         if cfg.exclude_names:
             for pat in cfg.exclude_names:
                 if fnmatch.fnmatchcase(path.name, pat):
                     return False
 
-        # exclude_patterns: match basename OR relative path
+
         if cfg.exclude_patterns:
             rel_str = self._safe_rel(path)
             for pat in cfg.exclude_patterns:
                 if fnmatch.fnmatchcase(path.name, pat) or fnmatch.fnmatchcase(rel_str, pat):
                     return False
 
-                # Directory subtree semantics: if pat matches "docs/*", exclude "docs/" too.
+
                 if is_dir:
                     probe = rel_str.rstrip("/") + "/__x__"
                     if fnmatch.fnmatchcase(probe, pat):
                         return False
 
-        # include pattern applies only to files
+
         if not is_dir and not fnmatch.fnmatchcase(path.name, cfg.include_pattern):
             return False
 
         return True
 
 
-# ============================================================================
-# Builder
-# ============================================================================
+
+
+
 
 class TreeBuilder:
     """Filesystem walker that builds a TreeNode hierarchy."""
@@ -222,10 +208,10 @@ class TreeBuilder:
                 raise FileNotFoundError(f"Root path does not exist: {r}")
             node = self._build_single_root(r)
             if node is None:
-                # everything excluded -> return minimal root node (no children)
+
                 node = TreeNode(name=r.name or str(r), path=r, is_dir=r.is_dir())
         else:
-            # Virtual root for combined view
+
             node = TreeNode(name="COMBINED VIEW", path=Path.cwd().resolve(), is_dir=True)
             for r in resolved:
                 if not r.exists():
@@ -250,7 +236,7 @@ class TreeBuilder:
             self.stats["total_size"] += n.size
             return n
 
-        # directory root
+
         if not nf.should_include(root, is_dir=True):
             self.stats["excluded_items"] += 1
             return None
@@ -261,7 +247,7 @@ class TreeBuilder:
         if self.config.recursive:
             self._populate_children(root_node, nf=nf, current_depth=0)
         else:
-            # non-recursive: only top-level listing
+
             self._populate_children(root_node, nf=nf, current_depth=0, allow_descend=False)
 
         self._sort_tree(root_node)
@@ -282,7 +268,7 @@ class TreeBuilder:
         if not node.is_dir:
             return
 
-        # max_depth applies only if recursive
+
         if allow_descend and cfg.max_depth is not None and current_depth >= cfg.max_depth:
             return
 
@@ -294,7 +280,7 @@ class TreeBuilder:
 
         children: List[TreeNode] = []
         for entry in entries:
-            # symlink handling
+
             try:
                 is_symlink = entry.is_symlink()
             except Exception:
@@ -348,7 +334,7 @@ class TreeBuilder:
         except Exception:
             node.is_symlink = False
 
-        # Stat only if needed by output or sorting
+
         need_stat = (
             cfg.show_size
             or cfg.show_last_modified
@@ -365,7 +351,7 @@ class TreeBuilder:
             except Exception:
                 pass
 
-        # Type sniffing is expensive: only if requested and only for files
+
         if cfg.show_file_type and not is_dir:
             node.file_type = self._detect_file_type(path)
 
@@ -373,7 +359,7 @@ class TreeBuilder:
 
     @staticmethod
     def _detect_file_type(path: Path) -> FileType:
-        # Fast shortcut by known binary extensions
+
         if path.suffix.lower() in FileContentDetector.BINARY_EXTENSIONS:
             return FileType.BINARY
         return FileContentDetector.detect_file_type(path)
@@ -402,9 +388,9 @@ class TreeBuilder:
         node.children.sort(key=sk, reverse=reverse)
 
 
-# ============================================================================
-# Renderers (ASCII)
-# ============================================================================
+
+
+
 
 class Renderer:
     def __init__(self, config: TreeConfig) -> None:
@@ -457,7 +443,7 @@ class TextRenderer(Renderer):
         return out
 
     def _render_node(self, node: TreeNode, *, prefix: str, is_last: bool, depth: int, lines: List[str]) -> None:
-        # virtual root not printed
+
         if node.name == "COMBINED VIEW" and node.path == Path.cwd().resolve():
             for i, child in enumerate(node.children):
                 self._render_node(child, prefix="", is_last=(i == len(node.children) - 1), depth=0, lines=lines)
@@ -473,7 +459,7 @@ class TextRenderer(Renderer):
             next_prefix = prefix + (self.config.tree_symbols["space"] if is_last else self.config.tree_symbols["vertical"])
         elif self.config.indent_style == "spaces":
             next_prefix = " " * (self.config.indent_size * (depth + 1))
-        else:  # dashes
+        else:
             next_prefix = "-" * (self.config.indent_size * (depth + 1)) + " "
 
         for i, child in enumerate(node.children):
@@ -496,7 +482,7 @@ class TextRenderer(Renderer):
 
         meta: List[str] = []
 
-        # IMPORTANT: keep file size LAST (tests/UX expectation: "... 3.00 B)")
+
         if not node.is_dir:
             if cfg.show_file_type and node.file_type is not None:
                 meta.append(node.file_type.value)
@@ -682,9 +668,9 @@ class XmlRenderer(Renderer):
         return el
 
 
-# ============================================================================
-# Orchestrator
-# ============================================================================
+
+
+
 
 class ProjectTreeGenerator:
     def __init__(self, config: TreeConfig) -> None:
@@ -706,7 +692,7 @@ class ProjectTreeGenerator:
         if not (self.config.use_gitignore or self.config.custom_gitignore):
             return None
 
-        # Align with comment_extractor: base root from first directory or cwd
+
         root = Path(self.config.directories[0]).resolve() if self.config.directories else Path.cwd().resolve()
         parser = GitIgnoreParser(root_dir=root)
 
@@ -746,9 +732,9 @@ class ProjectTreeGenerator:
             sys.stdout.write(content)
 
 
-# ============================================================================
-# CLI (aligned with comment_extractor)
-# ============================================================================
+
+
+
 
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -756,63 +742,63 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=r"""
 Examples:
-  # Basic tree of current directory (recursive)
+
   project-tree . -r
 
-  # Only Python files
+
   project-tree src -r -p "*.py"
 
-  # JSON output
+
   project-tree . -r --format json --output structure.json
 
-  # Include hidden files/dirs
+
   project-tree . -r --show-hidden
 
-  # Use gitignore
+
   project-tree . -r --use-gitignore
 """.strip(),
     )
 
-    # Input (same shape as comment_extractor)
+
     parser.add_argument("directories", nargs="*", default=["."], help="Directories to visualize (default: .)")
     parser.add_argument("-p", "--pattern", default="*", help='File pattern (e.g. "*.py")')
     parser.add_argument("-r", "--recursive", action="store_true", help="Search directories recursively")
     parser.add_argument("--max-depth", type=int, help="Maximum recursion depth (works with --recursive)")
 
-    # Output
+
     parser.add_argument("-f", "--format", choices=["text", "json", "xml", "markdown"], default="text")
     parser.add_argument("-o", "--output", type=Path, help="Write output to file (default: stdout)")
     parser.add_argument("--log-file", type=Path, help="Write logs to file (default: stderr)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logs")
 
-    # Filtering (same names as comment_extractor)
+
     parser.add_argument("-ed", "--exclude-dir", action="append", dest="exclude_dirs", help="Exclude directory by name (repeatable)")
     parser.add_argument("-en", "--exclude-name", action="append", dest="exclude_names", help="Exclude file by name/wildcard (repeatable)")
     parser.add_argument("-ep", "--exclude-pattern", action="append", dest="exclude_patterns", help="Exclude by path wildcard (repeatable)")
     parser.add_argument("--exclude-empty-dirs", action="store_true", help="Exclude empty directories")
 
-    # Gitignore (same names)
+
     parser.add_argument("-gi", "--gitignore", type=Path, help="Use specific .gitignore file")
     parser.add_argument("-ig", "--use-gitignore", action="store_true", help="Auto-discover and use .gitignore")
     parser.add_argument("--no-gitignore", action="store_true", help="Ignore .gitignore")
 
-    # Display options
+
     parser.add_argument("--show-hidden", action="store_true", help="Include hidden files/directories")
     parser.add_argument("--show-size", action="store_true", help="Show file sizes")
     parser.add_argument("--show-permissions", action="store_true", help="Show permissions (best-effort)")
     parser.add_argument("--show-last-modified", action="store_true", help="Show last modified date")
     parser.add_argument("--show-file-type", action="store_true", help="Show file type (may be slower)")
 
-    # Sorting
+
     parser.add_argument("--sort-by", choices=["name", "size", "modified", "type"], default="name")
     parser.add_argument("--sort-reverse", action="store_true", help="Reverse sort order")
 
-    # Style
+
     parser.add_argument("--indent-style", choices=["tree", "spaces", "dashes"], default="tree")
     parser.add_argument("--indent-size", type=int, default=4)
     parser.add_argument("--max-width", type=int, help="Max line width (truncate with '...')")
 
-    # Stats toggles
+
     parser.add_argument("--no-statistics", action="store_false", dest="include_statistics", default=True)
     parser.add_argument("--no-summary", action="store_false", dest="include_summary", default=True)
 
@@ -824,7 +810,7 @@ def create_config_from_args(args: argparse.Namespace) -> TreeConfig:
     custom_gitignore = None if args.no_gitignore else args.gitignore
 
     return TreeConfig(
-        # FilterConfig
+
         directories=args.directories,
         include_pattern=args.pattern,
         recursive=bool(args.recursive),
@@ -834,7 +820,7 @@ def create_config_from_args(args: argparse.Namespace) -> TreeConfig:
         exclude_patterns=set(args.exclude_patterns or []),
         use_gitignore=use_gitignore,
         custom_gitignore=custom_gitignore,
-        # TreeConfig
+
         output_file=args.output,
         format=args.format,
         log_file=args.log_file,
