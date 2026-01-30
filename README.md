@@ -1,5 +1,7 @@
 <p align="center">
-  <img src="docs/assets/logo.png" width="160" alt="CodingUtils logo">
+  <img src="docs/assets/logo.png"
+       alt="CodingUtils logo"
+       style="width: 100%; max-width: 900px; height: auto;">
 </p>
 
 # CodingUtils
