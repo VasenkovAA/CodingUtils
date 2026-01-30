@@ -1,682 +1,487 @@
-# Полное руководство по использованию утилиты `comment_extractor`
+# `comment_extractor` — руководство пользователя
 
-## Содержание
-1. [Введение](#введение)
-2. [Основные возможности](#основные-возможности)
-3. [Установка и зависимости](#установка-и-зависимости)
-4. [Базовое использование](#базовое-использование)
-5. [Параметры поиска файлов](#параметры-поиска-файлов)
-6. [Фильтрация и исключения](#фильтрация-и-исключения)
-7. [Обработка комментариев](#обработка-комментариев)
-8. [Языковая фильтрация](#языковая-фильтрация)
-9. [Расширенные сценарии](#расширенные-сценарии)
-10. [Форматы вывода](#форматы-вывода)
-11. [Примеры использования](#примеры-использования)
-12. [Сравнение с другими утилитами](#сравнение-с-другими-утилитами)
-13. [Советы и рекомендации](#советы-и-рекомендации)
+`comment_extractor` — CLI‑утилита для поиска, выгрузки и (опционально) удаления комментариев в исходном коде. Она умеет:
+
+- находить файлы по директориям, паттерну и исключениям;
+- учитывать `.gitignore` (по желанию);
+- извлекать строчные и блочные комментарии (включая многострочные блоки);
+- удалять комментарии в безопасном режиме (с резервными копиями по флагам);
+- экспортировать найденные комментарии в `.txt`, `.json`, `.jsonl`;
+- ограничивать удаление по языку комментариев (`langdetect`, опционально).
 
 ---
 
-## Введение
+## Содержание
 
-`comment_extractor` - это продвинутый инструмент для обнаружения, анализа и удаления комментариев в исходном коде. Поддерживает множество языков программирования, интеллектуальную фильтрацию по языку и совместим с `.gitignore`.
+1. [Быстрый старт](#быстрый-старт)
+2. [Установка](#установка)
+3. [Командная строка: синтаксис](#командная-строка-синтаксис)
+4. [Режимы работы: поиск / preview / удаление](#режимы-работы-поиск--preview--удаление)
+5. [Выбор файлов: директории, рекурсия, паттерн](#выбор-файлов-директории-рекурсия-паттерн)
+6. [Исключения: exclude-dir / exclude-name / exclude-pattern](#исключения-exclude-dir--exclude-name--exclude-pattern)
+7. [Поддержка `.gitignore`](#поддержка-gitignore)
+8. [Как определяется синтаксис комментариев](#как-определяется-синтаксис-комментариев)
+9. [Исключение комментариев по префиксу](#исключение-комментариев-по-префиксу)
+10. [Языковая фильтрация удаления (langdetect)](#языковая-фильтрация-удаления-langdetect)
+11. [Резервные копии (backup)](#резервные-копии-backup)
+12. [Экспорт результатов](#экспорт-результатов)
+13. [Логи и уровни подробности](#логи-и-уровни-подробности)
+14. [Ограничения и важные замечания](#ограничения-и-важные-замечания)
+15. [Рецепты (готовые сценарии)](#рецепты-готовые-сценарии)
+16. [Частые проблемы](#частые-проблемы)
 
-**Основное назначение:**
-- Очистка кода от ненужных комментариев
-- Анализ комментариев на разных языках
-- Экспорт документации из комментариев
-- Подготовка кода для продакшена
-- Аудит качества комментариев
+---
 
-## Основные возможности
+## Быстрый старт
 
-**Поддержка языков программирования:**
-- Python, JavaScript/TypeScript, Java
-- C/C++, C#, PHP, Ruby
-- Go, Rust, Lua, SQL
-- HTML, CSS/SCSS/SASS
-- Shell скрипты, Perl, R
-
-**Типы комментариев:**
-- Строчные комментарии (`#`, `//`, `--`)
-- Блочные комментарии (`/* */`, `<!-- -->`)
-- Встроенные комментарии (после кода)
-- Многострочные блоки
-
-**Фильтрация и анализ:**
-- Определение языка комментариев
-- Исключение по шаблонам
-- Поддержка `.gitignore`
-- Фильтрация по директориям и именам
-
-**Режимы работы:**
-- Детекция (только поиск)
-- Предварительный просмотр
-- Удаление комментариев
-- Экспорт в файл
-
-## Установка и зависимости
-
-### Базовые требования
-- Python 3.6+
-- Стандартные библиотеки Python
-
-### Опциональные зависимости
+### 1) Найти комментарии в текущей папке (без рекурсии)
 ```bash
-# Для языковой фильтрации комментариев
-pip install langdetect
-
-# Для расширенной обработки
-pip install chardet  # автоматическое определение кодировки
-```
-
-### Проверка установки
-```bash
-# Базовая проверка
-comment-extractor--help
-
-# Проверка с langdetect
-python -c "import langdetect; print('langdetect доступен')"
-```
-
-## Базовое использование
-
-### Простейшие примеры
-```bash
-# Поиск комментариев в текущей директории
 comment-extractor
+```
 
-# Поиск в конкретной директории
-comment-extractor /path/to/project
-
-# Поиск с рекурсией
+### 2) Рекурсивно по проекту
+```bash
 comment-extractor . -r
+```
 
-# Только Python файлы
+### 3) Только Python-файлы
+```bash
 comment-extractor . -r -p "*.py"
 ```
 
-### Режимы работы
+### 4) Предпросмотр удаления (ничего не изменяет)
 ```bash
-# 1. Детекция (по умолчанию) - только поиск
-comment-extractor -d src
-
-# 2. Предварительный просмотр
-comment-extractor -d src --preview
-
-# 3. Удаление комментариев
-comment-extractor -d src --remove-comments
-
-# 4. Экспорт комментариев
-comment-extractor -d src --export-comments comments.txt
+comment-extractor . -r -p "*.py" --remove-comments --preview
 ```
 
-## Параметры поиска файлов
-
-### Основные параметры
-
-| Параметр | Короткая форма | Описание | По умолчанию |
-|----------|----------------|----------|--------------|
-| `files` | - | Явный список файлов | - |
-| `--directory` | `-d` | Директория для поиска | текущая |
-| `--recursive` | `-r` | Рекурсивный поиск | False |
-| `--pattern` | `-p` | Паттерн поиска файлов | `*` |
-
-### Примеры поиска файлов
-
+### 5) Реальное удаление + сохранение бэкапов рядом с файлами
 ```bash
-# Явное указание файлов
-comment-extractor file1.py file2.js config.py
-
-# Несколько директорий
-comment-extractor -d src -d tests -d utils
-
-# Рекурсивный поиск с паттерном
-comment-extractor -d . -r -p "*.js"
-
-# Комбинация директорий и файлов
-comment-extractor main.py -d src -d lib
+comment-extractor . -r -p "*.py" --remove-comments --keep-backups
 ```
 
-### Поддерживаемые паттерны
-```bash
-# Расширения языков
--p "*.py"              # Python
--p "*.js" -p "*.ts"    # JavaScript/TypeScript
--p "*.java"            # Java
--p "*.cpp" -p "*.h"    # C/C++
--p "*.go"              # Go
--p "*.rs"              # Rust
--p "*.php"             # PHP
--p "*.rb"              # Ruby
--p "*.sh"              # Shell
--p "*.sql"             # SQL
+---
 
-# Шаблоны имен
--p "test_*.py"         # Тестовые файлы
--p "*_spec.js"         # Spec файлы
--p "config*.*"         # Конфигурационные файлы
--p "*.min.*"           # Минифицированные файлы
-```
+## Установка
 
-## Фильтрация и исключения
+### Требования
+- Python 3.10+
 
-### Флаги исключения
+### Опционально: языковая фильтрация
+Если нужен флаг `--language`, установите `langdetect`:
 
-| Флаг | Короткая форма | Описание | Примеры |
-|------|----------------|----------|---------|
-| `--exclude-dir` | `-ed` | Исключить директории по имени | `-ed venv -ed __pycache__` |
-| `--exclude-name` | `-en` | Исключить файлы по имени/шаблону | `-en "*.tmp" -en "temp_*"` |
-| `--exclude-pattern` | `-ep` | Исключить по полному пути/шаблону | `-ep "*test*" -ep "*backup*"` |
-
-### Примеры фильтрации
-
-```bash
-# Исключить системные директории
-comment-extractor -d . -r -ed venv -ed .git -ed __pycache__
-
-# Исключить сгенерированные файлы
-comment-extractor -d . -en "*.pyc" -en "__pycache__/*"
-
-# Исключить тестовые файлы
-comment-extractor -d src -ep "*test*" -ep "*spec.*"
-
-# Комплексная фильтрация
-comment-extractor -d . \
-  -ed node_modules \
-  -ed dist \
-  -ed build \
-  -en "*.log" \
-  -en "*.min.js" \
-  -ep "*_old*" \
-  -ep "*debug*"
-```
-
-### Использование .gitignore
-
-| Флаг | Короткая форма | Описание |
-|------|----------------|----------|
-| `--gitignore` | `-gi` | Использовать указанный .gitignore |
-| `--use-gitignore` | `-ig` | Автоматически найти .gitignore |
-
-```bash
-# Использовать стандартный .gitignore
-comment-extractor -d . -r -ig
-
-# Указать конкретный файл
-comment-extractor -d . -gi /path/to/.gitignore
-
-# Комбинировать с другими фильтрами
-comment-extractor -d . -ig -ed build -en "*.log"
-```
-
-## Обработка комментариев
-
-### Автоматическое определение символов комментариев
-Утилита автоматически определяет символы комментариев по расширению файла:
-
-| Расширение | Строчный | Блочный |
-|------------|----------|---------|
-| `.py` | `#` | - |
-| `.js`, `.ts` | `//` | `/* */` |
-| `.java` | `//` | `/* */` |
-| `.cpp`, `.c`, `.h` | `//` | `/* */` |
-| `.go` | `//` | `/* */` |
-| `.php` | `//` | `/* */` |
-| `.rb` | `#` | - |
-| `.sh` | `#` | - |
-| `.sql` | `--` | `/* */` |
-| `.lua` | `--` | - |
-| `.html` | - | `<!-- -->` |
-| `.css`, `.scss` | - | `/* */` |
-
-### Ручное указание символов
-```bash
-# Для нестандартных файлов
-comment-extractor -d . -c "//"
-
-# Для файлов без расширения
-comment-extractor script -c "#"
-```
-
-### Исключение определенных комментариев
-```bash
-# Исключить комментарии, начинающиеся с ##
-comment-extractor -d . -e "##"
-
-# Исключить TODOs и FIXMEs
-comment-extractor -d . -e "TODO" -e "FIXME"
-
-# Исключить заголовочные комментарии
-comment-extractor -d . -e "===" -e "---"
-```
-
-## Языковая фильтрация
-
-### Определение языка комментариев
-Для использования языковой фильтрации требуется установить `langdetect`:
 ```bash
 pip install langdetect
 ```
 
-### Примеры языковой фильтрации
+Проверка:
 ```bash
-# Только русские комментарии
-comment-extractor -d . -l "ru"
-
-# Только английские комментарии
-comment-extractor -d . -l "en"
-
-# Удалить неанглийские комментарии
-comment-extractor -d . -l "en" --remove-comments
-
-# Найти все иностранные комментарии
-comment-extractor -d . --preview --export-comments foreign.txt
+python -c "import langdetect; print('langdetect OK')"
 ```
 
-### Поддерживаемые языки
-```bash
-# Основные языки
--l "en"    # Английский
--l "ru"    # Русский
--l "es"    # Испанский
--l "fr"    # Французский
--l "de"    # Немецкий
--l "zh"    # Китайский
--l "ja"    # Японский
--l "ko"    # Корейский
+---
 
-# Полный список доступен в langdetect
-python -c "from langdetect import DetectorFactory; df = DetectorFactory(); print(df.get_langs())"
+## Командная строка: синтаксис
+
+### Общий вид
+```bash
+comment-extractor [DIRECTORY ...] [OPTIONS]
 ```
 
-### Особенности языковой фильтрации
-1. **Короткие комментарии** (< 3 символов) игнорируются
-2. **Технические термины** (def, class, import и т.д.) фильтруются
-3. **Знаки препинания** удаляются перед анализом
-4. **Смешанные языки** определяются по преобладающему
+- `DIRECTORY ...` — одна или несколько директорий. Если не указаны — используется текущая (`.`).
+- Большинство опций можно комбинировать.
 
-## Расширенные сценарии
-
-### Очистка проекта для продакшена
+### Справка
 ```bash
-# Удалить все комментарии из продакшен кода
-comment-extractor -d src \
-  -r \
-  -ig \
-  --remove-comments \
-  -o cleanup.log
-
-# Сохранить только английские комментарии
-comment-extractor -d src \
-  -r \
-  -l "en" \
-  --remove-comments \
-  --export-comments kept_comments.txt
+comment-extractor --help
 ```
 
-### Анализ комментариев в проекте
-```bash
-# Собрать статистику комментариев
-comment-extractor -d . \
-  -r \
-  --export-comments all_comments.txt
+---
 
-# Анализ распределения языков
-comment-extractor -d . \
-  -r \
-  --export-comments by_language/ \
-  --preview
+## Режимы работы: поиск / preview / удаление
+
+Утилита может работать в трёх основных сценариях:
+
+### A) Только поиск (по умолчанию)
+- Находит комментарии и печатает их в stdout.
+- Файлы не меняются.
+
+```bash
+comment-extractor src -r -p "*.js"
 ```
 
-### Подготовка кода для локализации
-```bash
-# Извлечь все русские комментарии для перевода
-comment-extractor -d src \
-  -r \
-  -l "ru" \
-  --export-comments ru_comments.txt
+### B) Preview удаления (`--remove-comments --preview`)
+- Вычисляет, какие комментарии **были бы удалены**, и считает статистику.
+- Файлы не меняются.
 
-# Удалить переведенные комментарии
-comment-extractor -d src \
-  -r \
-  -l "ru" \
-  --remove-comments \
-  --export-comments removed_ru_comments.txt
+```bash
+comment-extractor src -r -p "*.js" --remove-comments --preview
 ```
 
-### Аудит качества комментариев
-```bash
-# Найти пустые или бесполезные комментарии
-comment-extractor -d . \
-  -r \
-  --preview \
-  | grep -E "^\s*$|TODO|FIXME|HACK|XXX"
+### C) Реальное удаление (`--remove-comments`)
+- Удаляет комментарии из файлов.
+- При необходимости делает резервные копии (см. раздел про бэкапы).
 
-# Проверить соответствие стандартам
-comment-extractor -d . \
-  -r \
+```bash
+comment-extractor src -r -p "*.js" --remove-comments
+```
+
+---
+
+## Выбор файлов: директории, рекурсия, паттерн
+
+### `DIRECTORY ...`
+Примеры:
+
+```bash
+comment-extractor src
+comment-extractor src tests
+comment-extractor /path/to/project -r
+```
+
+### `-r / --recursive`
+Рекурсивный обход:
+
+```bash
+comment-extractor . -r
+```
+
+### `-p / --pattern`
+Файловый паттерн (glob по имени файла, например `*.py`, `*.js`):
+
+```bash
+comment-extractor . -r -p "*.py"
+comment-extractor src -p "test_*.py"
+```
+
+Важно:
+- В текущей версии `--pattern` принимает **один** паттерн за запуск.
+- Если нужно обработать несколько расширений — обычно делают несколько запусков:
+
+```bash
+comment-extractor src -r -p "*.py" --export-comments py.json
+comment-extractor src -r -p "*.js" --export-comments js.json
+```
+
+### `--max-depth`
+Ограничение глубины обхода при `-r`:
+
+```bash
+comment-extractor . -r --max-depth 3
+```
+
+---
+
+## Исключения: exclude-dir / exclude-name / exclude-pattern
+
+Исключения применяются на этапе поиска файлов.
+
+### `-ed / --exclude-dir NAME`
+Исключает директории по имени сегмента пути (например `venv`, `node_modules`):
+
+```bash
+comment-extractor . -r -ed venv -ed node_modules -ed __pycache__
+```
+
+### `-en / --exclude-name GLOB`
+Исключает файлы по имени (basename) через glob:
+
+```bash
+comment-extractor . -r -en "*.min.js" -en "*.pyc"
+```
+
+### `-ep / --exclude-pattern GLOB`
+Исключает по пути (паттерн может матчить относительный путь и имя):
+
+```bash
+comment-extractor . -r -ep "tests/*" -ep "**/migrations/*"
+```
+
+---
+
+## Поддержка `.gitignore`
+
+### Авто-поиск `.gitignore`
+```bash
+comment-extractor . -r -ig
+# или
+comment-extractor . -r --use-gitignore
+```
+
+### Использовать конкретный `.gitignore`
+```bash
+comment-extractor . -r -gi /path/to/.gitignore
+```
+
+### Полностью отключить `.gitignore`
+```bash
+comment-extractor . -r --no-gitignore
+```
+
+---
+
+## Как определяется синтаксис комментариев
+
+По умолчанию утилита выбирает “стиль комментариев” по расширению файла через `FileContentDetector.get_comment_style()`.
+
+Примерно (упрощённо):
+- `.py` → `#` (+ в вашей экосистеме могут поддерживаться тройные кавычки как блочный маркер)
+- `.js/.ts/.java/.c/.cpp` → `//` и `/* */`
+- `.sql` → `--` и `/* */`
+- `.html/.xml` → `<!-- -->`
+- `.css` → `/* */`
+
+### Принудительное переопределение: `-c / --comment-symbols`
+Формат задаётся строкой (лучше всегда брать в кавычки):
+
+1) Только строчный комментарий:
+```bash
+comment-extractor . -r -p "*.conf" -c "#"
+```
+
+2) Только блочный:
+```bash
+comment-extractor . -r -p "*.tmpl" -c "/* */"
+```
+
+3) Строчный + блочный:
+```bash
+comment-extractor . -r -p "*.txt" -c "# /* */"
+```
+
+---
+
+## Исключение комментариев по префиксу
+
+### `-e / --exclude-comment-pattern PREFIX`
+
+Иногда в проекте есть “служебные” комментарии, которые нельзя удалять/учитывать. Например:
+- `##` — особые метки
+- `#!` — shebang в скриптах
+- `# noqa`/`# fmt: off` и т.п. (зависит от вашего стиля)
+
+Пример: игнорировать комментарии, начинающиеся с `##`:
+```bash
+comment-extractor . -r -p "*.py" -e "##"
+```
+
+Важно:
+- это **один** префикс на запуск;
+- применяется к “сырым данным комментария” с позиции маркера;
+- если строка начинается с исключаемого префикса (например `## ...`), она **не будет** считаться комментарием, и утилита не будет пытаться “найти второй #”.
+
+---
+
+## Языковая фильтрация удаления (langdetect)
+
+### Что делает `--language`
+Флаг `--language` влияет **на удаление** (и счётчик removed), но не обязательно на “видимость” комментариев в выводе/экспорте.
+
+Пример: удалять только русские комментарии:
+```bash
+comment-extractor . -r -p "*.py" --remove-comments --language ru
+```
+
+Preview того же сценария:
+```bash
+comment-extractor . -r -p "*.py" --remove-comments --preview --language ru
+```
+
+### `--min-langdetect-len`
+Минимальная длина текста (после очистки), при которой запускается `langdetect`.
+Короткие комментарии часто классифицируются нестабильно, поэтому по умолчанию короткие строки “проходят” как удаляемые.
+
+Пример: считать язык только для длинных комментариев:
+```bash
+comment-extractor . -r -p "*.py" --remove-comments --language en --min-langdetect-len 40
+```
+
+---
+
+## Резервные копии (backup)
+
+
+### Когда вообще создаются бэкапы
+Бэкап создаётся **только если одновременно**:
+- включено реальное удаление: `--remove-comments`
+- **нет** `--preview`
+- действительно есть что удалить (removed_count > 0)
+- включено сохранение бэкапов: `--keep-backups` или `--backup-dir`
+
+### `--keep-backups`
+Сохранять бэкапы рядом с изменёнными файлами:
+
+```bash
+comment-extractor . -r -p "*.py" --remove-comments --keep-backups
+```
+
+Пример:
+- `src/main.py` → бэкап `src/main.py.bak`
+
+### `--backup-dir PATH`
+Сохранять бэкапы в отдельную директорию, **с сохранением структуры** относительно “базовой директории”.
+
+```bash
+comment-extractor . -r -p "*.py" --remove-comments --backup-dir .backups
+```
+
+Пример:
+- исходник: `src/main.py`
+- бэкап: `.backups/src/main.py.bak`
+
+> База для относительного пути — первая директория из списка `DIRECTORY ...`. Если определить относительный путь не удалось, бэкап будет сохранён просто как `<backup-dir>/<filename>.bak`.
+
+### `--overwrite-backups`
+По умолчанию, если бэкап уже существует, создаётся версия `.bak.1`, `.bak.2` …
+
+```bash
+comment-extractor . -r -p "*.py" --remove-comments --backup-dir .backups
+comment-extractor . -r -p "*.py" --remove-comments --backup-dir .backups
+# -> .backups/src/main.py.bak и .backups/src/main.py.bak.1
+```
+
+Если вы хотите всегда держать только последний бэкап:
+
+```bash
+comment-extractor . -r -p "*.py" --remove-comments --backup-dir .backups --overwrite-backups
+```
+
+---
+
+## Экспорт результатов
+
+### `--export-comments PATH`
+Экспортирует найденные комментарии. Формат зависит от расширения:
+
+- `.txt` — текстовый отчёт
+- `.json` — структурированный JSON
+- `.jsonl` — JSON Lines (по одному объекту на строку)
+
+#### Экспорт в JSON
+```bash
+comment-extractor . -r -p "*.py" --export-comments comments.json
+```
+
+#### Экспорт в JSONL
+```bash
+comment-extractor . -r --export-comments comments.jsonl
+```
+
+#### Экспорт + preview
+```bash
+comment-extractor src -r -p "*.js" --remove-comments --preview --export-comments audit.json
+```
+
+### Структура JSON (пример)
+`comments.json` содержит объект:
+
+```json
+{
+  "generated_at": "2026-01-30 12:34:56",
+  "total_comments": 123,
+  "comments": [
+    {
+      "file": "/abs/path/src/main.py",
+      "relative_path": "src/main.py",
+      "kind": "line",
+      "start_line": 10,
+      "start_col": 15,
+      "end_line": 10,
+      "end_col": 40,
+      "text": "TODO: refactor",
+      "raw": "# TODO: refactor"
+    }
+  ]
+}
+```
+
+---
+
+## Логи и уровни подробности
+
+### `-o / --output FILE`
+Записать лог в файл:
+
+```bash
+comment-extractor . -r -o run.log
+```
+
+### `--log-file FILE`
+Устаревший алиас для `--output` (оставлен для совместимости).
+
+### `-v / --verbose`
+Более подробный вывод (debug‑информация):
+
+```bash
+comment-extractor . -r -v
+```
+
+---
+
+## Ограничения и важные замечания
+
+1) **Парсинг “вне строк” — эвристика.**
+   Утилита пытается не принимать `//` или `#` внутри строк (`"..."`, `'...'`, `` `...` ``), но это не полноценный парсер языка.
+
+2) **Python и тройные кавычки.**
+   В вашей экосистеме тройные кавычки могут считаться блочными “комментариями” для совместимости. На практике это может быть docstring/строка.
+   Рекомендация: для `.py` всегда сначала `--preview`, потом проверка `git diff`.
+
+3) **Незакрытые блочные комментарии.**
+   Если блок начался и не закрылся до EOF:
+   - в `remove`‑режиме утилита считает, что блок продолжается до конца файла, вырезает его и сохраняет количество строк;
+   - в `extract`‑режиме ничего не меняет, но пишет warning.
+
+4) **Один `--pattern` и один `--exclude-comment-pattern` за запуск.**
+   Для сложной логики используйте несколько запусков либо постобработку экспортов.
+
+---
+
+## Рецепты (готовые сценарии)
+
+### 1) “Сканировать проект как git”
+```bash
+comment-extractor . -r -ig
+```
+
+### 2) Реально удалить комментарии только в `src/`, не трогая зависимости/сборки
+```bash
+comment-extractor src -r -ig \
+  -ed venv -ed node_modules -ed dist -ed build \
   -p "*.py" \
-  --export-comments python_comments_audit.txt
-```
-
-## Форматы вывода
-
-### Консольный вывод
-```
-Comment Extractor Configuration:
-  Directory: /path/to/project
-  Pattern: *.py
-  Recursive: True
-  Exclusions applied:
-    Directories: venv, __pycache__
-    Names: *.pyc
-============================================================
-Found 42 files to process
-============================================================
-src/main.py:10: This is a comment
-src/utils.py:5: Another comment here
-...
-============================================================
-Found 156 comments out of 200 total
-Processed 42 files
-```
-
-### Файловый вывод
-```bash
-# Логирование в файл
-comment-extractor -d . -o extraction.log
-
-# Экспорт комментариев
-comment-extractor -d . --export-comments comments.txt
-```
-
-### Формат экспортированных комментариев
-```
-EXTRACTED COMMENTS: 156 comments from 42 files
-============================================================
-
-FILE: src/main.py:10
-COMMENT: This is a comment
-----------------------------------------
-
-FILE: src/utils.py:5
-COMMENT: Another comment here
-----------------------------------------
-```
-
-### Настройка логирования
-```bash
-# Минимальный вывод
-comment-extractor -d . --quiet 2>/dev/null
-
-# Детальный лог
-comment-extractor -d . -o detailed.log
-
-# Раздельные логи
-comment-extractor -d . \
-  --export-comments comments.txt \
-  -o process.log
-```
-
-## Примеры использования
-
-### Пример 1: Базовая очистка Python проекта
-```bash
-comment-extractor -d . \
-  -r \
+  --remove-comments --preview
+# посмотреть вывод, затем:
+comment-extractor src -r -ig \
+  -ed venv -ed node_modules -ed dist -ed build \
   -p "*.py" \
-  -ed venv \
-  -ed __pycache__ \
-  -en "*.pyc" \
-  --remove-comments \
-  -o cleanup_python.log
+  --remove-comments --backup-dir .backups
 ```
 
-### Пример 2: Анализ многоязычного проекта
+### 3) Аудит на секреты
 ```bash
-# Собрать все комментарии
-comment-extractor -d . \
-  -r \
-  --export-comments all_comments.txt
-
-# Разделить по языкам
-comment-extractor -d . -r -l "en" --export-comments english.txt
-comment-extractor -d . -r -l "ru" --export-comments russian.txt
-comment-extractor -d . -r -l "es" --export-comments spanish.txt
-
-# Проанализировать распределение
-wc -l *comments.txt
+comment-extractor . -r -ig --export-comments comments.txt
+grep -iE "password|secret|token|api[_-]?key" comments.txt
 ```
 
-### Пример 3: Подготовка кода к ревью
+### 4) Удалить только английские комментарии (если установлен langdetect)
 ```bash
-# Удалить временные комментарии
-comment-extractor -d src \
-  -r \
-  -e "TODO" \
-  -e "FIXME" \
-  -e "HACK" \
-  -e "XXX" \
-  --remove-comments \
-  --export-comments removed_todos.txt
+comment-extractor . -r -p "*.js" --remove-comments --language en --backup-dir .backups
 ```
 
-### Пример 4: Миграция комментариев
-```bash
-# Экспорт всех комментариев из старой кодовой базы
-comment-extractor -d legacy_code \
-  -r \
-  --export-comments legacy_comments.txt
+---
 
-# Импорт в новую систему (пример обработки)
-cat legacy_comments.txt | grep -v "FILE:" > clean_comments.txt
-```
+## Частые проблемы
 
-### Пример 5: Аудит безопасности
-```bash
-# Поиск потенциально опасных комментариев
-comment-extractor -d . \
-  -r \
-  --export-comments security_audit.txt
+### “Почему нет `.bak`?”
+Проверьте:
+- вы не используете `--preview`
+- реально что‑то было удалено (иначе файл не переписывается)
+- вы включили сохранение бэкапов: `--keep-backups` или `--backup-dir`
 
-# Проверка на наличие секретов
-grep -i "password\|secret\|key\|token\|credential" security_audit.txt
-```
+По умолчанию (без этих флагов) **постоянные** `.bak` не создаются.
 
-### Пример 6: Генерация документации
-```bash
-# Извлечь docstring и важные комментарии
-comment-extractor -d src \
-  -r \
-  -p "*.py" \
-  -e "#" \
-  --export-comments documentation.txt
+### “Я указал `--language`, но ничего не изменилось”
+- убедитесь, что установлен `langdetect`
+- помните: фильтрация влияет на удаление; если язык не совпал, комментарии остаются
 
-# Отфильтровать только полезные комментарии
-grep -v "^#" documentation.txt | grep -v "^$" > clean_docs.txt
-```
-
-## Советы и рекомендации
-
-### Безопасность работы
-
-1. **Всегда используйте `--preview` перед удалением:**
-```bash
-# Сначала проверьте
-comment-extractor -d . --preview
-
-# Затем удаляйте
-comment-extractor -d . --remove-comments
-```
-
-2. **Создавайте резервные копии:**
-```bash
-# Перед массовым удалением
-cp -r project/ project_backup/
-comment-extractor -d project --remove-comments
-```
-
-3. **Используйте систему контроля версий:**
-```bash
-# Сделайте коммит перед изменениями
-git add .
-git commit -m "Before comment removal"
-
-# Выполните удаление
-comment-extractor -d . --remove-comments
-
-# Проверьте изменения
-git diff
-```
-
-### Производительность
-
-1. **Исключайте ненужные директории:**
-```bash
-# Оптимизированный запуск
-comment-extractor -d . \
-  -ed node_modules \
-  -ed venv \
-  -ed .git \
-  -ed __pycache__ \
-  -ed dist \
-  -ed build
-```
-
-2. **Используйте конкретные паттерны:**
-```bash
-# Вместо
-comment-extractor -d . -r
-
-# Используйте
-comment-extractor -d src -r -p "*.py"
-```
-
-3. **Ограничивайте глубину рекурсии через фильтры:**
-```bash
-# Исключить глубокие директории
-comment-extractor -d . -ed "**/node_modules/**" -ed "**/vendor/**"
-```
-
-### Интеграция в рабочий процесс
-
-#### CI/CD пайплайн
-```yaml
-# .gitlab-ci.yml
-audit_comments:
-  stage: test
-  script:
-    - comment-extractor -d src -r --export-comments comments_audit.txt
-    - comment-extractor -d src -r -l "en" --preview
-  artifacts:
-    paths:
-      - comments_audit.txt
-```
-
-#### Makefile
-```makefile
-.PHONY: clean-comments
-clean-comments:
-	comment-extractor -d src -r --remove-comments
-
-.PHONY: audit-comments
-audit-comments:
-	comment-extractor -d . -r --export-comments comments_audit_$(shell date +%Y%m%d).txt
-
-.PHONY: preview-comments
-preview-comments:
-	comment-extractor -d . -r --preview
-```
-
-#### Скрипты оболочки
-```bash
-#!/bin/bash
-# cleanup_project.sh
-
-set -e
-
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_DIR="backup_${TIMESTAMP}"
-
-echo "Создание резервной копии..."
-cp -r project/ "${BACKUP_DIR}/"
-
-echo "Анализ комментариев..."
-comment-extractor -d project -r --preview > "preview_${TIMESTAMP}.log"
-
-read -p "Продолжить с удалением комментариев? (y/n): " -n 1 -r
-echo
-
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    echo "Удаление комментариев..."
-    comment-extractor -d project -r --remove-comments > "removal_${TIMESTAMP}.log"
-    echo "Готово! Резервная копия в ${BACKUP_DIR}"
-else
-    echo "Операция отменена."
-fi
-```
-
-### Расширенные настройки
-
-#### Кастомные символы комментариев
-```bash
-# Для нестандартных форматов
-comment-extractor -d . -c "%%"  # MATLAB-style
-comment-extractor -d . -c "(*"  # Pascal-style (начало)
-```
-
-#### Обработка специфичных файлов
-```bash
-# Dockerfile
-comment-extractor -d . -p "Dockerfile" -c "#"
-
-# Makefile
-comment-extractor -d . -p "Makefile" -c "#"
-
-# Конфиги YAML
-comment-extractor -d . -p "*.yaml" -p "*.yml" -c "#"
-```
-
-#### Пакетная обработка
-```bash
-# Обработка проектов по списку
-for project in project1 project2 project3; do
-    echo "Обработка $project..."
-    comment-extractor -d "$project" \
-        -r \
-        --export-comments "${project}_comments.txt" \
-        -o "${project}_process.log"
-done
-```
-
-### Решение проблем
-
-#### Проблема: Не определяется язык комментариев
-```bash
-# Проверьте установку langdetect
-python -c "import langdetect; print('OK')"
-
-# Используйте без языковой фильтрации
-comment-extractor -d . --preview
-```
-
-#### Проблема: Кодировка файлов
-```bash
-# Принудительно укажите кодировку (в коде можно добавить параметр)
-# Или конвертируйте файлы заранее
-find . -name "*.py" -exec iconv -f WINDOWS-1251 -t UTF-8 {} -o {}.utf8 \;
-```
-
-#### Проблема: Слишком много false positives
-```bash
-# Настройте исключения
-comment-extractor -d . \
-  -e "TODO" \
-  -e "FIXME" \
-  -e "NOTE" \
-  --preview
-
-# Или используйте языковую фильтрацию
-comment-extractor -d . -l "en" --preview
-```
+### “Хочу несколько паттернов файлов”
+Сделайте несколько запусков или используйте `--exclude-*` для отсечения лишнего.

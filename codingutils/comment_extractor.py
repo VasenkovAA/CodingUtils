@@ -1,633 +1,981 @@
 """
-Script for automatic detection and removal of code comments.
-Supports multiple file types and languages with .gitignore support.
+comment_extractor — advanced comment extractor/remover.
+
+Features:
+- File discovery via FileSystemWalker (+ optional gitignore)
+- Detect line and block comments (incl. multi-line blocks)
+- Preview mode: shows what would be removed, does not change files
+- Optional language filter via langdetect
+- Export found comments to .txt/.json/.jsonl
 """
 
+from __future__ import annotations
+
 import argparse
-import os
-import re
-import fnmatch
-import sys
-from pathlib import Path
-from typing import List, Tuple, Optional
+import json
 import logging
+import re
+import shutil
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from codingutils.common_utils import (
+    FilterConfig,
+    FileContentDetector,
+    FileSystemWalker,
+    FileType,
+    GitIgnoreParser,
+    ProgressReporter,
+    get_relative_path,
+    safe_write,
+)
 
 try:
     from langdetect import detect, LangDetectException
     LANGDETECT_AVAILABLE = True
 except ImportError:
     LANGDETECT_AVAILABLE = False
+    detect = None
+    LangDetectException = Exception
 
 
-class GitIgnoreParser:
-    """Parser for .gitignore files with support for patterns."""
+logger = logging.getLogger(__name__)
 
-    def __init__(self, gitignore_path: Optional[Path] = None):
-        self.patterns = []
-        if gitignore_path and gitignore_path.exists():
-            self.parse_gitignore(gitignore_path)
 
-    def parse_gitignore(self, gitignore_path: Path) -> None:
-        """Parse .gitignore file and extract patterns."""
-        try:
-            with open(gitignore_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    self.patterns.append(line)
-        except Exception as e:
-            print(f"Warning: Could not parse .gitignore file: {e}", file=sys.stderr)
 
-    def should_ignore(self, path: Path, root_dir: Path) -> bool:
-        """Check if path should be ignored based on .gitignore patterns."""
-        if not self.patterns:
-            return False
 
-        try:
-            relative_path = path.relative_to(root_dir)
-        except ValueError:
-            return False
 
-        path_str = str(relative_path).replace('\\', '/')
-        should_ignore_result = False
 
-        for pattern in self.patterns:
-            if pattern.startswith('!'):
-                neg_pattern = pattern[1:]
-                if self._pattern_matches(path, path_str, neg_pattern):
-                    return False
+@dataclass(slots=True)
+class CommentExtractorConfig(FilterConfig):
+    """
+    comment_symbols override format (optional):
+      - "//"            -> line comment only
+      - "/* */"         -> block comment only
+      - "// /* */"      -> line + block
+    """
+
+    comment_symbols: Optional[str] = None
+    exclude_comment_pattern: Optional[str] = None
+    language_filter: Optional[str] = None
+
+    remove_comments: bool = False
+    preview_mode: bool = False
+
+    export_file: Optional[Path] = None
+    log_file: Optional[Path] = None
+
+    use_cache: bool = True
+    min_langdetect_len: int = 20
+
+
+    keep_backups: bool = False
+    backup_dir: Optional[Path] = None
+    overwrite_backups: bool = False
+
+    def __post_init__(self) -> None:
+
+        FilterConfig.__post_init__(self)
+
+        if self.language_filter and not LANGDETECT_AVAILABLE:
+            logger.warning("langdetect not available. Install with: pip install langdetect")
+
+
+        if self.backup_dir is not None:
+            self.keep_backups = True
+
+
+
+
+
+
+@dataclass(slots=True)
+class CommentMatch:
+    kind: str
+    start_line: int
+    start_col: int
+    end_line: int
+    end_col: int
+    raw: str
+    text: str
+
+
+@dataclass(slots=True)
+class CommentStyle:
+    line_markers: Tuple[str, ...] = ()
+    block_markers: Tuple[Tuple[str, str], ...] = ()
+
+    @staticmethod
+    def from_extension(ext: str) -> "CommentStyle":
+        style = FileContentDetector.get_comment_style(Path(f"dummy{ext}")) or {}
+        lines: Tuple[str, ...] = (style["line"],) if style.get("line") else ()
+        blocks: List[Tuple[str, str]] = []
+        if style.get("block"):
+            blocks.append(tuple(style["block"]))
+        if style.get("alt_block"):
+            blocks.append(tuple(style["alt_block"]))
+        return CommentStyle(line_markers=lines, block_markers=tuple(blocks))
+
+    @staticmethod
+    def from_override(spec: str) -> "CommentStyle":
+        parts = spec.strip().split()
+        if not parts:
+            return CommentStyle()
+        if len(parts) == 1:
+            return CommentStyle(line_markers=(parts[0],), block_markers=())
+        if len(parts) == 2:
+            return CommentStyle(line_markers=(), block_markers=((parts[0], parts[1]),))
+        return CommentStyle(line_markers=(parts[0],), block_markers=((parts[1], parts[2]),))
+
+
+
+
+
+
+class _StringScanner:
+    """Find tokens outside simple single-line strings."""
+    QUOTES = ('"', "'", "`")
+
+    @classmethod
+    def find_next_token_outside_strings(
+        cls,
+        line: str,
+        start: int,
+        tokens: Sequence[str],
+    ) -> Tuple[int, Optional[str]]:
+        if not tokens:
+            return -1, None
+
+        in_str = False
+        quote: Optional[str] = None
+        i = start
+
+        while i < len(line):
+            ch = line[i]
+
+            if in_str and ch == "\\":
+                i += 2
                 continue
 
-            if self._pattern_matches(path, path_str, pattern):
-                should_ignore_result = True
+            if ch in cls.QUOTES:
+                if not in_str:
+                    in_str = True
+                    quote = ch
+                elif quote == ch:
+                    in_str = False
+                    quote = None
+                i += 1
+                continue
 
-        return should_ignore_result
+            if not in_str:
+                for tok in tokens:
+                    if tok and line.startswith(tok, i):
+                        return i, tok
 
-    def _pattern_matches(self, path: Path, path_str: str, pattern: str) -> bool:
-        """Check if a pattern matches the given path."""
-        if '**' in pattern:
-            if pattern == '**':
-                return True
-            pattern = pattern.replace('**/', '').replace('/**', '/*')
-            if pattern.startswith('**'):
-                pattern = pattern[2:]
+            i += 1
 
-        if pattern.endswith('/'):
-            dir_pattern = pattern.rstrip('/')
-            if path.is_dir() and fnmatch.fnmatch(path_str, dir_pattern):
-                return True
-            if fnmatch.fnmatch(path_str, dir_pattern + '/*'):
-                return True
+        return -1, None
+
+
+
+
+
+
+class CommentScanner:
+    """
+    Extract and optionally strip comments.
+
+    Supports:
+    - multiple comments per line (e.g. block then line)
+    - multi-line block comments
+    - exclude_comment_pattern (prefix applied to raw comment starting at marker position)
+
+    Behavior on unclosed block comment:
+    - remove=True: treat until EOF as comment and strip it, preserving line count
+    - remove=False: keep original content, but emit warning
+    """
+
+    def __init__(self, style: CommentStyle, *, exclude_comment_pattern: Optional[str] = None) -> None:
+        self.style = style
+        self.exclude_comment_pattern = exclude_comment_pattern
+
+
+        self._in_block = False
+        self._block_end_tok = ""
+        self._block_start_line = 0
+        self._block_start_col = 0
+        self._block_prefix_before_start = ""
+        self._block_original_lines: List[str] = []
+        self._block_raw_parts: List[str] = []
+
+    def scan_and_strip(
+        self,
+        lines: Iterable[str],
+        *,
+        remove: bool,
+        should_remove: "callable[[CommentMatch], bool]",
+    ) -> Tuple[List[str], List[CommentMatch], int]:
+        out_lines: List[str] = []
+        matches: List[CommentMatch] = []
+        removed_count = 0
+
+        for line_no, raw_line in enumerate(lines, 1):
+            if self._in_block:
+                flushed, new_matches, removed_delta = self._process_line_in_block(
+                    line_no, raw_line, remove=remove, should_remove=should_remove
+                )
+                out_lines.extend(flushed)
+                matches.extend(new_matches)
+                removed_count += removed_delta
+                continue
+
+            flushed, new_matches, removed_delta = self._process_line_no_block(
+                line_no, raw_line, remove=remove, should_remove=should_remove
+            )
+            out_lines.extend(flushed)
+            matches.extend(new_matches)
+            removed_count += removed_delta
+
+
+        if self._in_block:
+            logger.warning("Unclosed block comment starting at line %d", self._block_start_line)
+            if remove:
+
+                out_lines.append(self._block_prefix_before_start.rstrip() + "\n")
+                out_lines.extend(["\n"] * max(0, len(self._block_original_lines) - 1))
+            else:
+                out_lines.extend(self._block_original_lines)
+            self._reset_block_state()
+
+        return out_lines, matches, removed_count
+
+    def _process_line_no_block(
+        self,
+        line_no: int,
+        raw_line: str,
+        *,
+        remove: bool,
+        should_remove: "callable[[CommentMatch], bool]",
+    ) -> Tuple[List[str], List[CommentMatch], int]:
+        nl = "\n" if raw_line.endswith("\n") else ""
+        line = raw_line[:-1] if nl else raw_line
+
+        tokens: List[str] = []
+        tokens.extend(self.style.line_markers)
+        tokens.extend([s for s, _e in self.style.block_markers])
+
+        out = line
+        i = 0
+        matches: List[CommentMatch] = []
+        removed = 0
+
+        while i < len(out):
+            pos, tok = _StringScanner.find_next_token_outside_strings(out, i, tokens)
+            if pos == -1 or tok is None:
+                break
+
+
+            if tok in self.style.line_markers:
+                raw_comment = out[pos:]
+                if self._is_excluded(raw_comment):
+
+                    return [raw_line], matches, removed
+
+                m = CommentMatch(
+                    kind="line",
+                    start_line=line_no,
+                    start_col=pos,
+                    end_line=line_no,
+                    end_col=len(out),
+                    raw=raw_comment,
+                    text=self._clean_comment_text(raw_comment, kind="line"),
+                )
+                matches.append(m)
+
+                if remove and should_remove(m):
+                    removed += 1
+                    out = out[:pos].rstrip()
+                    break
+
+                i = pos + len(tok)
+                continue
+
+
+            end_tok = self._end_for_start(tok)
+            if not end_tok:
+                i = pos + len(tok)
+                continue
+
+            end_pos = out.find(end_tok, pos + len(tok))
+            if end_pos != -1:
+                end_col = end_pos + len(end_tok)
+                raw_comment = out[pos:end_col]
+
+                if self._is_excluded(raw_comment):
+                    i = end_col
+                    continue
+
+                m = CommentMatch(
+                    kind="block",
+                    start_line=line_no,
+                    start_col=pos,
+                    end_line=line_no,
+                    end_col=end_col,
+                    raw=raw_comment,
+                    text=self._clean_comment_text(raw_comment, kind="block"),
+                )
+                matches.append(m)
+
+                if remove and should_remove(m):
+                    removed += 1
+                    out = out[:pos] + out[end_col:]
+                    i = pos
+                else:
+                    i = end_col
+                continue
+
+
+            self._enter_block_state(
+                end_tok=end_tok,
+                line_no=line_no,
+                start_col=pos,
+                raw_line=raw_line,
+                prefix=out[:pos],
+                comment_part=(out[pos:] + nl),
+            )
+            return [], matches, removed
+
+        return [out + nl], matches, removed
+
+    def _process_line_in_block(
+        self,
+        line_no: int,
+        raw_line: str,
+        *,
+        remove: bool,
+        should_remove: "callable[[CommentMatch], bool]",
+    ) -> Tuple[List[str], List[CommentMatch], int]:
+        nl = "\n" if raw_line.endswith("\n") else ""
+        line = raw_line[:-1] if nl else raw_line
+
+        self._block_original_lines.append(raw_line)
+
+        end_pos = line.find(self._block_end_tok)
+        if end_pos == -1:
+            self._block_raw_parts.append(raw_line)
+            return [], [], 0
+
+        end_col = end_pos + len(self._block_end_tok)
+        self._block_raw_parts.append(line[:end_col])
+        remainder = line[end_col:] + nl
+
+        raw_comment = "".join(self._block_raw_parts)
+        excluded = self._is_excluded(raw_comment)
+
+        m = CommentMatch(
+            kind="block",
+            start_line=self._block_start_line,
+            start_col=self._block_start_col,
+            end_line=line_no,
+            end_col=end_col,
+            raw=raw_comment,
+            text=self._clean_comment_text(raw_comment, kind="block"),
+        )
+
+        flushed: List[str] = []
+        matches: List[CommentMatch] = []
+        removed = 0
+
+        if not excluded:
+            matches.append(m)
+
+        do_remove = remove and (not excluded) and should_remove(m)
+
+        if do_remove:
+            removed = 1
+            flushed.append(self._block_prefix_before_start.rstrip() + "\n")
+
+            middle_count = (line_no - self._block_start_line) - 1
+            flushed.extend(["\n"] * max(0, middle_count))
+
+
+            rem_lines, rem_matches, rem_removed = self._process_line_no_block(
+                line_no, remainder, remove=True, should_remove=should_remove
+            )
+            flushed.extend(rem_lines)
+            matches.extend(rem_matches)
+            removed += rem_removed
         else:
-            if fnmatch.fnmatch(path_str, pattern):
-                return True
-            if fnmatch.fnmatch(path.name, pattern):
-                return True
+            flushed.extend(self._block_original_lines)
 
-        return False
+        self._reset_block_state()
+        return flushed, matches, removed
+
+    def _enter_block_state(
+        self,
+        *,
+        end_tok: str,
+        line_no: int,
+        start_col: int,
+        raw_line: str,
+        prefix: str,
+        comment_part: str,
+    ) -> None:
+        self._in_block = True
+        self._block_end_tok = end_tok
+        self._block_start_line = line_no
+        self._block_start_col = start_col
+        self._block_prefix_before_start = prefix
+        self._block_original_lines = [raw_line]
+        self._block_raw_parts = [comment_part]
+
+    def _reset_block_state(self) -> None:
+        self._in_block = False
+        self._block_end_tok = ""
+        self._block_start_line = 0
+        self._block_start_col = 0
+        self._block_prefix_before_start = ""
+        self._block_original_lines = []
+        self._block_raw_parts = []
+
+    def _end_for_start(self, start_tok: str) -> str:
+        for s, e in self.style.block_markers:
+            if s == start_tok:
+                return e
+        return ""
+
+    def _is_excluded(self, raw_comment: str) -> bool:
+        if not self.exclude_comment_pattern:
+            return False
+        return raw_comment.startswith(self.exclude_comment_pattern)
+
+    @staticmethod
+    def _clean_comment_text(raw: str, *, kind: str) -> str:
+        s = raw.strip()
+        if kind == "line":
+            s = re.sub(r"^\s*(#|//|--)\s?", "", s)
+            return s.strip()
+
+        s = re.sub(r"^\s*(/\*|<!--|\"\"\"|''')\s?", "", s)
+        s = re.sub(r"\s*(\*/|-->|\"\"\"|''')\s*$", "", s)
+        return s.strip()
+
+
+
 
 
 
 class CommentProcessor:
-    """Process comments in code files based on configuration."""
-
-    DEFAULT_COMMENT_SYMBOLS = {
-        '.py': '#',
-        '.cpp': '//', '.c': '//', '.h': '//', '.hpp': '//',
-        '.java': '//',
-        '.js': '//', '.ts': '//',
-        '.rs': '//',
-        '.go': '//',
-        '.php': '//',
-        '.rb': '#',
-        '.sh': '#',
-        '.pl': '#', '.pm': '#',
-        '.r': '#',
-        '.lua': '--',
-        '.sql': '--',
-        '.html': '<!--',
-        '.css': None,
-    }
-
-    BLOCK_COMMENT_START = {
-        '.css': '/*',
-        '.scss': '/*', '.sass': '/*',
-        '.less': '/*',
-        '.java': '/*',
-        '.js': '/*', '.ts': '/*',
-        '.cpp': '/*', '.c': '/*', '.h': '/*', '.hpp': '/*',
-        '.php': '/*',
-        '.sql': '/*',
-    }
-
-    BLOCK_COMMENT_END = {
-        '.css': '*/',
-        '.scss': '*/', '.sass': '*/',
-        '.less': '*/',
-        '.java': '*/',
-        '.js': '*/', '.ts': '*/',
-        '.cpp': '*/', '.c': '*/', '.h': '*/', '.hpp': '*/',
-        '.php': '*/',
-        '.sql': '*/',
-    }
-
-    def __init__(self, config):
+    def __init__(self, config: CommentExtractorConfig) -> None:
         self.config = config
-        self.gitignore_parser = None
-        self.root_dir = Path.cwd()
-        if self.config.gitignore:
-            gitignore_path = Path(self.config.gitignore)
-            if gitignore_path.exists():
-                self.gitignore_parser = GitIgnoreParser(gitignore_path)
+        self.file_walker = self._create_walker(config)
+
+
+        self._cache: Optional[Dict[str, Tuple[float, Tuple[int, List[CommentMatch]]]]] = (
+            {} if config.use_cache else None
+        )
+
+        if self.config.language_filter and not LANGDETECT_AVAILABLE:
+            logger.warning("Language filter requested but langdetect is not installed; filter will be ignored.")
+
+        if self.config.backup_dir is not None:
+            self.config.backup_dir = Path(self.config.backup_dir).resolve()
+
+    @staticmethod
+    def _create_walker(config: CommentExtractorConfig) -> FileSystemWalker:
+        parser: Optional[GitIgnoreParser] = None
+        if config.use_gitignore or config.custom_gitignore:
+            root_dir = Path(config.directories[0]).resolve() if config.directories else Path.cwd().resolve()
+            parser = GitIgnoreParser(root_dir=root_dir)
+            if config.custom_gitignore:
+                parser.load_from_file(config.custom_gitignore)
             else:
-                print(f"Warning: Gitignore file '{self.config.gitignore}' not found", file=sys.stderr)
-        elif self.config.use_gitignore:
-            current_gitignore = Path('.gitignore')
-            if current_gitignore.exists():
-                self.gitignore_parser = GitIgnoreParser(current_gitignore)
-                print(f"Auto-discovered .gitignore: {current_gitignore.resolve()}", file=sys.stderr)
+                parser.load_from_file()
+        return FileSystemWalker(config, parser)
 
-        self.setup_logging()
+    def find_files(self) -> List[Path]:
+        roots = [Path(d).resolve() for d in (self.config.directories or ["."])]
+        files = self.file_walker.find_files(roots, recursive=self.config.recursive)
 
-    def setup_logging(self):
-        """Setup logging based on configuration."""
-        if self.config.output or self.config.log_file:
-            log_file = self.config.output or self.config.log_file
-            logging.basicConfig(
-                filename=log_file,
-                level=logging.INFO,
-                format='%(message)s',
-                filemode='w'
-            )
-        else:
-            logging.basicConfig(level=logging.INFO, format='%(message)s')
+        stats = self.file_walker.stats
+        logger.info("Found %d files to process", len(files))
+        logger.info(
+            "Excluded %d files and %d directories",
+            stats.get("files_excluded", 0),
+            stats.get("directories_excluded", 0),
+        )
+        return files
 
-    def should_exclude_path(self, file_path: Path) -> bool:
-        """Check if file should be excluded based on all filters."""
-        path_str = str(file_path)
-        path_name = file_path.name
+    def process_files(self) -> Dict[str, Any]:
+        files = self.find_files()
+        if not files:
+            logger.warning("No files found matching criteria")
+            return {"total_files": 0, "total_comments": 0, "removed_comments": 0, "comments": []}
 
-        if self.gitignore_parser:
-            if self.gitignore_parser.should_ignore(file_path, self.root_dir):
-                return True
+        self._log_configuration()
 
-        if self.config.exclude_dirs:
-            for exclude_dir in self.config.exclude_dirs:
-                if exclude_dir in path_str.split(os.sep):
-                    parts = path_str.split(os.sep)
-                    if exclude_dir in parts:
-                        return True
+        total_removed = 0
+        total_comments = 0
+        all_comments: List[Dict[str, Any]] = []
 
-        if self.config.exclude_names:
-            for exclude_name in self.config.exclude_names:
-                if fnmatch.fnmatch(path_name, exclude_name):
-                    return True
+        with ProgressReporter(total=len(files), description="Extracting comments") as progress:
+            for p in files:
+                try:
+                    removed, matches = self.process_file(p)
+                    total_removed += removed
+                    total_comments += len(matches)
 
-        if self.config.exclude_patterns:
-            for exclude_pattern in self.config.exclude_patterns:
-                if fnmatch.fnmatch(path_name, exclude_pattern):
-                    return True
-                rel_path = str(file_path.relative_to(self.root_dir)) if file_path.is_relative_to(self.root_dir) else str(file_path)
-                if fnmatch.fnmatch(rel_path, exclude_pattern):
-                    return True
+                    rel = get_relative_path(p)
+                    for m in matches:
+                        logger.info("%s:%d: %s", rel, m.start_line, m.text)
+                        all_comments.append(
+                            {
+                                "file": str(p),
+                                "relative_path": rel,
+                                "kind": m.kind,
+                                "start_line": m.start_line,
+                                "start_col": m.start_col,
+                                "end_line": m.end_line,
+                                "end_col": m.end_col,
+                                "text": m.text,
+                                "raw": m.raw,
+                            }
+                        )
+                except Exception as e:
+                    logger.error("Failed to process %s: %s", p, e)
 
-        if self.config.pattern != '*':
-            if not fnmatch.fnmatch(path_name, self.config.pattern):
+                progress.update(1)
+
+        self._log_summary(total_removed, total_comments, len(files))
+
+        if self.config.export_file and all_comments:
+            self._export_comments(all_comments, Path(self.config.export_file))
+
+        return {
+            "total_files": len(files),
+            "total_comments": total_comments,
+            "removed_comments": total_removed,
+            "comments": all_comments,
+        }
+
+    def process_file(self, file_path: Path) -> Tuple[int, List[CommentMatch]]:
+        if FileContentDetector.detect_file_type(file_path) != FileType.TEXT:
+            logger.debug("Skipping non-text file: %s", file_path)
+            return 0, []
+
+        cache_key = str(file_path)
+        try:
+            mtime = file_path.stat().st_mtime
+        except Exception:
+            mtime = -1.0
+
+        if self._cache is not None and cache_key in self._cache:
+            cached_mtime, cached_result = self._cache[cache_key]
+            if cached_mtime == mtime:
+                return cached_result
+
+        encoding = FileContentDetector.detect_encoding(file_path)
+        try:
+            with open(file_path, "r", encoding=encoding, errors="strict") as f:
+                lines = f.readlines()
+        except UnicodeDecodeError:
+            logger.warning("Decoding failed with %s for %s, falling back to latin-1", encoding, file_path)
+            encoding = "latin-1"
+            with open(file_path, "r", encoding=encoding, errors="replace") as f:
+                lines = f.readlines()
+
+        style = (
+            CommentStyle.from_override(self.config.comment_symbols)
+            if self.config.comment_symbols
+            else CommentStyle.from_extension(file_path.suffix)
+        )
+        if not style.line_markers and not style.block_markers:
+            style = CommentStyle(line_markers=("#",), block_markers=())
+
+        if self.config.remove_comments and file_path.suffix.lower() == ".py" and style.block_markers:
+            logger.warning("Removing block comments in .py may remove docstrings: %s", file_path)
+
+        scanner = CommentScanner(style, exclude_comment_pattern=self.config.exclude_comment_pattern)
+
+        def should_remove(m: CommentMatch) -> bool:
+            if not self.config.remove_comments:
                 return False
+            return self._should_remove_comment(m.text)
 
-        return False
 
-    def get_comment_symbol(self, file_path: str) -> Tuple[str, Optional[str], Optional[str]]:
-        """Get comment symbols for given file path."""
-        if self.config.comment_symbols:
-            return self.config.comment_symbols, None, None
+        remove_flag = bool(self.config.remove_comments)
 
-        ext = os.path.splitext(file_path)[1].lower()
-        line_symbol = self.DEFAULT_COMMENT_SYMBOLS.get(ext)
-        block_start = self.BLOCK_COMMENT_START.get(ext)
-        block_end = self.BLOCK_COMMENT_END.get(ext)
+        out_lines, matches, removed_count = scanner.scan_and_strip(
+            lines,
+            remove=remove_flag,
+            should_remove=should_remove,
+        )
 
-        if line_symbol is None and block_start is not None:
-            return "", block_start, block_end
+        if removed_count > 0 and self.config.remove_comments and not self.config.preview_mode:
+            backup_path = None
+            try:
 
-        if line_symbol is None and not self.config.comment_symbols:
-            raise ValueError(
-                f"Cannot determine comment symbol for {file_path}. "
-                f"Use --comment-symbols to specify it manually."
-            )
+                if self.config.keep_backups:
+                    backup_path = self._create_persistent_backup(file_path)
 
-        return line_symbol, block_start, block_end
+                ok = safe_write(
+                    file_path,
+                    "".join(out_lines),
+                    encoding=encoding,
+                    backup=False,
+                )
+                if not ok:
 
-    def is_comment_line(self, line: str, comment_symbol: str,
-                   in_block_comment: bool = False,
-                   block_start: Optional[str] = None,
-                   block_end: Optional[str] = None) -> Tuple[bool, Optional[str], bool]:
-        """Check if line contains comments and return comment text if found."""
-        line = line.rstrip()
+                    if backup_path and backup_path.exists():
+                        try:
+                            shutil.copy2(backup_path, file_path)
+                        except Exception:
+                            pass
+                    raise RuntimeError(f"Failed to write updated file: {file_path}")
+            except Exception:
 
-        if block_start and block_end:
-            if not in_block_comment and block_start in line:
-                start_idx = line.find(block_start)
-                if block_end in line:
-                    end_idx = line.find(block_end) + len(block_end)
-                    comment_text = line[start_idx:end_idx]
-                    return True, comment_text, False
-                else:
-                    return True, None, True
-            elif in_block_comment:
-                if block_end in line:
-                    end_idx = line.find(block_end) + len(block_end)
-                    return True, line[:end_idx], False
-                else:
-                    return True, None, True
+                if backup_path and backup_path.exists():
+                    try:
+                        shutil.copy2(backup_path, file_path)
+                    except Exception:
+                        pass
+                raise
 
-        if not comment_symbol:
-            return False, None, in_block_comment
+        result = (removed_count, matches)
+        if self._cache is not None:
+            self._cache[cache_key] = (mtime, result)
+        return result
 
-        in_string = False
-        string_char = None
-        i = 0
 
-        while i < len(line):
-            char = line[i]
 
-            if char == '\\' and i + 1 < len(line):
-                i += 2
-                continue
 
-            if char in ['"', "'"]:
-                if not in_string:
-                    in_string = True
-                    string_char = char
-                elif string_char == char:
-                    in_string = False
-                    string_char = None
 
-            if not in_string and line[i:].startswith(comment_symbol):
-                comment_text = line[i + len(comment_symbol):].lstrip()
+    def _backup_base_dir(self) -> Path:
 
-                if self.config.exclude_pattern and line[i:].startswith(self.config.exclude_pattern):
-                    return False, None, in_block_comment
-                return True, comment_text, in_block_comment
+        if self.config.directories:
+            return Path(self.config.directories[0]).resolve()
+        return Path.cwd().resolve()
 
+    def _default_adjacent_backup_path(self, file_path: Path) -> Path:
+
+        return file_path.with_name(file_path.name + ".bak")
+
+    def _target_backup_path(self, file_path: Path) -> Path:
+        if self.config.backup_dir is None:
+            return self._default_adjacent_backup_path(file_path)
+
+        base = self._backup_base_dir()
+        src = file_path.resolve()
+        try:
+            rel = src.relative_to(base)
+        except Exception:
+            rel = Path(src.name)
+
+        target = (self.config.backup_dir / rel).with_name(rel.name + ".bak")
+        return target
+
+    @staticmethod
+    def _next_versioned_backup_path(p: Path) -> Path:
+
+        i = 1
+        while True:
+            candidate = Path(str(p) + f".{i}")
+            if not candidate.exists():
+                return candidate
             i += 1
 
-        return False, None, in_block_comment
+    def _create_persistent_backup(self, file_path: Path) -> Optional[Path]:
+        if not file_path.exists():
+            return None
 
-    def should_remove_comment(self, comment_text: str) -> bool:
-        """Check if comment should be removed based on language settings."""
-        if not self.config.language:
+        target = self._target_backup_path(file_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if target.exists():
+            if self.config.overwrite_backups:
+                try:
+                    target.unlink()
+                except Exception:
+
+                    target = self._next_versioned_backup_path(target)
+            else:
+                target = self._next_versioned_backup_path(target)
+
+        shutil.copy2(file_path, target)
+        logger.debug("Backup created: %s", target)
+        return target
+
+
+
+
+
+    def _should_remove_comment(self, comment_text: str) -> bool:
+        if not self.config.language_filter:
+            return True
+        if not LANGDETECT_AVAILABLE:
             return True
 
-        if not LANGDETECT_AVAILABLE:
-            logging.warning("langdetect not available. Installing: pip install langdetect")
+        cleaned = self._normalize_for_langdetect(comment_text)
+        if len(cleaned) < int(self.config.min_langdetect_len):
             return True
 
         try:
-            cleaned_text = re.sub(r'\b(def|class|function|var|let|const|import|from)\b', '', comment_text)
-            cleaned_text = re.sub(r'[^\w\s]', ' ', cleaned_text)
-            cleaned_text = cleaned_text.strip()
-
-            if not cleaned_text or len(cleaned_text) < 3:
-                return True
-
-            detected_lang = detect(cleaned_text)
-            return detected_lang == self.config.language
-
+            lang = detect(cleaned)
+            return lang == self.config.language_filter
         except LangDetectException:
             return True
 
-    def process_file(self, file_path: str) -> Tuple[int, List[Tuple[int, str]]]:
-        """Process single file and return number of removed comments and comment list."""
+    @staticmethod
+    def _normalize_for_langdetect(text: str) -> str:
+        s = re.sub(r"\b(def|class|function|var|let|const|import|from|return|if|else)\b", " ", text, flags=re.I)
+        s = re.sub(r"[^\w\s]+", " ", s, flags=re.UNICODE)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+
+
+
+
+    def _export_comments(self, comments: List[Dict[str, Any]], export_path: Path) -> None:
+        export_path = Path(export_path)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+
         try:
-            comment_symbol, block_start, block_end = self.get_comment_symbol(file_path)
-        except ValueError as e:
-            logging.error(f"ERROR: {e}")
-            return 0, []
+            suf = export_path.suffix.lower()
+            if suf == ".json":
+                payload = {
+                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "total_comments": len(comments),
+                    "comments": comments,
+                }
+                with open(export_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                logger.info("Comments exported to: %s", export_path)
+                return
 
-        removed_count = 0
-        new_lines = []
-        comments_found = []
-        in_block_comment = False
+            if suf == ".jsonl":
+                with open(export_path, "w", encoding="utf-8") as f:
+                    for c in comments:
+                        f.write(json.dumps(c, ensure_ascii=False) + "\n")
+                logger.info("Comments exported to: %s", export_path)
+                return
 
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-        except UnicodeDecodeError:
-            try:
-                with open(file_path, 'r', encoding='latin-1') as f:
-                    lines = f.readlines()
-            except Exception as e:
-                logging.error(f"Error reading {file_path}: {e}")
-                return 0, []
 
-        for line_num, line in enumerate(lines, 1):
-            is_comment, comment_text, block_state = self.is_comment_line(
-                line, comment_symbol, in_block_comment, block_start, block_end
-            )
+            with open(export_path, "w", encoding="utf-8") as f:
+                f.write("EXTRACTED COMMENTS REPORT\n")
+                f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Total comments: {len(comments)}\n")
+                f.write("=" * 60 + "\n\n")
 
-            if block_state is not None:
-                in_block_comment = block_state
+                by_file: Dict[str, List[Dict[str, Any]]] = {}
+                for c in comments:
+                    by_file.setdefault(c["relative_path"], []).append(c)
 
-            if is_comment and comment_text:
-                should_remove = self.should_remove_comment(comment_text)
-                comments_found.append((line_num, comment_text.strip()))
+                for rel_path, items in sorted(by_file.items()):
+                    f.write(f"\nFILE: {rel_path}\n")
+                    f.write("-" * 40 + "\n")
+                    for c in items:
+                        f.write(f"{c['kind']} {c['start_line']}:{c['start_col']}: {c['text']}\n")
+                    f.write(f"\nTotal in file: {len(items)}\n")
 
-                if should_remove:
-                    removed_count += 1
+                f.write("\n" + "=" * 60 + "\n")
+                f.write(f"Total files: {len(by_file)}\n")
+                f.write(f"Total comments: {len(comments)}\n")
 
-                    if self.config.remove_comments:
-                        if line.lstrip().startswith(comment_symbol) or (block_start and block_start in line):
-                            continue
-                        else:
-                            comment_pos = line.find(comment_symbol)
-                            if comment_pos != -1:
-                                new_line = line[:comment_pos].rstrip() + '\n'
-                                new_lines.append(new_line)
-                            elif block_start and block_start in line:
-                                start_idx = line.find(block_start)
-                                end_idx = line.find(block_end) + len(block_end) if block_end and block_end in line else len(line)
-                                new_line = line[:start_idx] + line[end_idx:].lstrip()
-                                if new_line.strip():
-                                    new_lines.append(new_line)
-                                else:
-                                    continue
-                            else:
-                                new_lines.append(line)
-                        continue
+            logger.info("Comments exported to: %s", export_path)
+        except Exception as e:
+            logger.error("Failed to export comments: %s", e)
 
-            new_lines.append(line)
 
-        if self.config.remove_comments and removed_count > 0:
-            try:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.writelines(new_lines)
-            except Exception as e:
-                logging.error(f"Error writing {file_path}: {e}")
 
-        return removed_count, comments_found
 
-    def find_files(self) -> List[str]:
-        """Find files based on configuration."""
-        files = []
 
-        if self.config.files:
-            for file_path in self.config.files:
-                path = Path(file_path)
-                if path.exists() and path.is_file():
-                    if not self.should_exclude_path(path):
-                        files.append(str(path))
-                else:
-                    print(f"Warning: File '{file_path}' not found, skipping", file=sys.stderr)
-            return files
+    def _log_configuration(self) -> None:
+        logger.info("=" * 60)
+        logger.info("COMMENT EXTRACTOR CONFIGURATION")
+        logger.info("=" * 60)
+        logger.info("Directories: %s", ", ".join(self.config.directories or ["."]))
+        logger.info("Pattern: %s", self.config.include_pattern)
+        logger.info("Recursive: %s", self.config.recursive)
+        logger.info("Remove comments: %s", self.config.remove_comments)
+        logger.info("Preview mode: %s", self.config.preview_mode)
 
-        search_paths = []
-        if self.config.directories:
-            for dir_path in self.config.directories:
-                path = Path(dir_path)
-                if path.exists() and path.is_dir():
-                    search_paths.append(path)
-                else:
-                    print(f"Warning: Directory '{dir_path}' not found, skipping", file=sys.stderr)
+        if self.config.comment_symbols:
+            logger.info("Override comment symbols: %s", self.config.comment_symbols)
+        if self.config.language_filter:
+            logger.info("Language filter: %s", self.config.language_filter)
+        if self.config.exclude_comment_pattern:
+            logger.info("Exclude comment pattern: %s", self.config.exclude_comment_pattern)
+
+        if self.config.use_gitignore or self.config.custom_gitignore:
+            logger.info("Gitignore: enabled")
+
+        if self.config.keep_backups:
+            if self.config.backup_dir:
+                logger.info("Backups: enabled (dir=%s, overwrite=%s)", self.config.backup_dir, self.config.overwrite_backups)
+            else:
+                logger.info("Backups: enabled (adjacent, overwrite=%s)", self.config.overwrite_backups)
+
+        logger.info("=" * 60)
+
+    def _log_summary(self, removed: int, found: int, files: int) -> None:
+        logger.info("=" * 60)
+        logger.info("PROCESSING SUMMARY")
+        logger.info("=" * 60)
+
+        if self.config.preview_mode and self.config.remove_comments:
+            action = "Would remove"
+        elif self.config.remove_comments:
+            action = "Removed"
         else:
-            search_path = Path(self.config.directory)
-            if search_path.exists():
-                if search_path.is_file():
-                    return [str(search_path)]
-                else:
-                    search_paths.append(search_path)
-            else:
-                print(f"Error: Directory '{self.config.directory}' does not exist", file=sys.stderr)
-                return []
+            action = "Found"
 
-        for search_path in search_paths:
-            if self.config.recursive:
-                for file_path in search_path.rglob(self.config.pattern):
-                    if file_path.is_file():
-                        if not self.should_exclude_path(file_path):
-                            files.append(str(file_path))
-            else:
-                for item in search_path.iterdir():
-                    if item.is_file() and fnmatch.fnmatch(item.name, self.config.pattern):
-                        if not self.should_exclude_path(item):
-                            files.append(str(item))
-
-        return sorted(set(files))
-
-    def process_files(self):
-        """Process all found files."""
-        files = self.find_files()
-        total_removed = 0
-        total_comments = 0
-
-        if not files:
-            logging.warning("No files found matching the criteria")
-            return
-
-        logging.info("Comment Extractor Configuration:")
-        if self.config.directories:
-            logging.info(f"  Directories: {', '.join(self.config.directories)}")
-        else:
-            logging.info(f"  Directory: {self.config.directory}")
-
-        logging.info(f"  Pattern: {self.config.pattern}")
-        logging.info(f"  Recursive: {self.config.recursive}")
-
-        if self.config.language:
-            logging.info(f"  Language filter: {self.config.language}")
-
-        if self.config.exclude_dirs or self.config.exclude_names or self.config.exclude_patterns:
-            logging.info("  Exclusions applied:")
-            if self.config.exclude_dirs:
-                logging.info(f"    Directories: {', '.join(self.config.exclude_dirs)}")
-            if self.config.exclude_names:
-                logging.info(f"    Names: {', '.join(self.config.exclude_names)}")
-            if self.config.exclude_patterns:
-                logging.info(f"    Patterns: {', '.join(self.config.exclude_patterns)}")
-
-        if self.gitignore_parser:
-            if self.config.gitignore:
-                logging.info(f"  Gitignore: {self.config.gitignore}")
-            else:
-                logging.info("  Gitignore: auto-discovered")
-
-        logging.info("=" * 60)
-        logging.info(f"Found {len(files)} files to process")
-        logging.info("=" * 60)
-
-        all_comments = []
-
-        for file_path in files:
-            try:
-                removed, comments = self.process_file(file_path)
-                total_removed += removed
-                total_comments += len(comments)
-
-                for line_num, comment in comments:
-                    if self.config.preview or not self.config.remove_comments:
-                        logging.info(f"{file_path}:{line_num}: {comment}")
-                    all_comments.append((file_path, line_num, comment))
-
-            except Exception as e:
-                logging.error(f"Error processing {file_path}: {e}")
-
-        logging.info("=" * 60)
-        action = "Would remove" if self.config.preview else ("Removed" if self.config.remove_comments else "Found")
-        logging.info(f"{action} {total_removed} comments out of {total_comments} total")
-        logging.info(f"Processed {len(files)} files")
-
-        if self.config.export_comments and all_comments:
-            export_path = self.config.export_comments
-            try:
-                with open(export_path, 'w', encoding='utf-8') as f:
-                    f.write(f"EXTRACTED COMMENTS: {len(all_comments)} comments from {len(files)} files\n")
-                    f.write("=" * 60 + "\n\n")
-
-                    for file_path, line_num, comment in all_comments:
-                        f.write(f"FILE: {file_path}:{line_num}\n")
-                        f.write(f"COMMENT: {comment}\n")
-                        f.write("-" * 40 + "\n")
-
-                logging.info(f"Comments exported to: {export_path}")
-            except Exception as e:
-                logging.error(f"Error exporting comments: {e}")
+        logger.info("%s %d comments out of %d detected", action, removed, found)
+        logger.info("Processed %d files", files)
+        logger.info("=" * 60)
 
 
-def main():
+
+
+
+
+def _configure_logging(log_file: Optional[Path], *, verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    handlers: List[logging.Handler] = []
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(level)
+    console.setFormatter(logging.Formatter("%(message)s"))
+    handlers.append(console)
+
+    if log_file:
+        fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("%(message)s"))
+        handlers.append(fh)
+
+    logging.basicConfig(level=level, handlers=handlers, force=True)
+
+
+def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Auto-detector and remover of code comments",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description="Advanced comment extractor and remover",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+
+    parser.add_argument("directories", nargs="*", default=["."], help="Directories to process")
+    parser.add_argument("-p", "--pattern", default="*", help='File pattern (e.g. "*.py")')
+    parser.add_argument("-r", "--recursive", action="store_true", help="Search recursively")
+
+
+    parser.add_argument("-c", "--comment-symbols", help='Override: "//" or "/* */" or "// /* */"')
+    parser.add_argument("-e", "--exclude-comment-pattern", help='Exclude comments starting with this prefix (e.g. "##")')
+    parser.add_argument("-l", "--language", help='Filter removal by comment language (e.g. "en", "ru")')
+
+
+    parser.add_argument("--remove-comments", action="store_true", help="Remove comments from files")
+    parser.add_argument("--preview", action="store_true", help="Preview without modifying files")
+    parser.add_argument("--export-comments", type=Path, help="Export comments (.txt/.json/.jsonl)")
+
+
+    parser.add_argument("-ed", "--exclude-dir", action="append", dest="exclude_dirs", help="Exclude directory name")
+    parser.add_argument("-en", "--exclude-name", action="append", dest="exclude_names", help="Exclude file wildcard")
+    parser.add_argument("-ep", "--exclude-pattern", action="append", dest="exclude_patterns", help="Exclude path wildcard")
+    parser.add_argument("--max-depth", type=int, help="Maximum recursion depth")
+
+
+    parser.add_argument("-ig", "--use-gitignore", action="store_true", help="Auto-discover and use .gitignore")
+    parser.add_argument("-gi", "--gitignore", type=Path, help="Use a specific .gitignore")
+    parser.add_argument("--no-gitignore", action="store_true", help="Ignore .gitignore")
+
+
+    parser.add_argument("-o", "--output", type=Path, help="Output log file")
+    parser.add_argument("--log-file", type=Path, help="Legacy alias for --output")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+
+
+    parser.add_argument("--no-cache", action="store_true", help="Disable caching")
+    parser.add_argument("--min-langdetect-len", type=int, default=20, help="Min length for language detection")
+
+
+    parser.add_argument("--keep-backups", action="store_true", help="Keep backups after successful write")
+    parser.add_argument("--backup-dir", type=Path, help="Directory to store backups (preserves relative structure)")
     parser.add_argument(
-        'files',
-        nargs='*',
-        help='Explicit list of files to process (overrides directory search)'
+        "--overwrite-backups",
+        action="store_true",
+        help="Overwrite existing backups (else create .bak.1/.bak.2...)",
     )
 
-    parser.add_argument(
-        'directory',
-        nargs='?',
-        default='.',
-        help='Directory to search files in (default: current directory)'
+    args = parser.parse_args(argv)
+    if args.log_file and not args.output:
+        args.output = args.log_file
+    return args
+
+
+def create_config_from_args(args: argparse.Namespace) -> CommentExtractorConfig:
+    use_gitignore = bool(args.use_gitignore) and not bool(args.no_gitignore)
+    custom_gitignore = None if args.no_gitignore else args.gitignore
+
+    return CommentExtractorConfig(
+        directories=args.directories,
+        include_pattern=args.pattern,
+        recursive=args.recursive,
+        exclude_dirs=set(args.exclude_dirs or []),
+        exclude_names=set(args.exclude_names or []),
+        exclude_patterns=set(args.exclude_patterns or []),
+        max_depth=args.max_depth,
+        use_gitignore=use_gitignore,
+        custom_gitignore=custom_gitignore,
+        comment_symbols=args.comment_symbols,
+        exclude_comment_pattern=args.exclude_comment_pattern,
+        language_filter=args.language if LANGDETECT_AVAILABLE else None,
+        remove_comments=args.remove_comments,
+        preview_mode=args.preview,
+        export_file=args.export_comments,
+        log_file=args.output,
+        use_cache=not args.no_cache,
+        min_langdetect_len=int(args.min_langdetect_len),
+        keep_backups=bool(args.keep_backups) or bool(args.backup_dir),
+        backup_dir=args.backup_dir,
+        overwrite_backups=bool(args.overwrite_backups),
     )
 
-    parser.add_argument(
-        '-d', '--directory',
-        action='append',
-        dest='directories',
-        help='Directory to search files in (can be used multiple times)'
-    )
 
-    parser.add_argument(
-        '-r', '--recursive',
-        action='store_true',
-        help='Search recursively in subdirectories'
-    )
-
-    parser.add_argument(
-        '-p', '--pattern',
-        default='*',
-        help='File pattern to search (e.g., "*.py" or "*.cpp")'
-    )
-
-    parser.add_argument(
-        '-c', '--comment-symbols',
-        help='Comment symbols (e.g., "#" or "//"). If not specified, auto-detected by file extension'
-    )
-
-    parser.add_argument(
-        '-e', '--exclude-pattern',
-        help='Pattern to exclude from comments (e.g., "##" to exclude lines starting with ##)'
-    )
-
-    parser.add_argument(
-        '-l', '--language',
-        help='Language code for comments (e.g., "ru" for Russian, "en" for English)'
-    )
-
-    parser.add_argument(
-        '--remove-comments',
-        action='store_true',
-        help='Actually remove comments (without this flag, only detection)'
-    )
-
-    parser.add_argument(
-        '--preview',
-        action='store_true',
-        help='Preview what would be done without actually removing comments'
-    )
-
-    parser.add_argument(
-        '-o', '--output',
-        help='Output file for results (replaces --log-file)'
-    )
-
-    parser.add_argument(
-        '--log-file',
-        help='Log file to write results (legacy, use --output instead)'
-    )
-
-    parser.add_argument(
-        '--export-comments',
-        help='Export all found comments to specified file'
-    )
-
-    parser.add_argument(
-        '-ed', '--exclude-dir',
-        action='append',
-        dest='exclude_dirs',
-        help='Exclude directory by name (can be used multiple times)'
-    )
-
-    parser.add_argument(
-        '-en', '--exclude-name',
-        action='append',
-        dest='exclude_names',
-        help='Exclude file by exact name or wildcard (can be used multiple times)'
-    )
-
-    parser.add_argument(
-        '-ep', '--exclude-path-pattern',
-        action='append',
-        dest='exclude_patterns',
-        help='Exclude by pattern (can be used multiple times, supports wildcards)'
-    )
-
-    parser.add_argument(
-        '-gi', '--gitignore',
-        help='Use specific .gitignore file for filtering'
-    )
-
-    parser.add_argument(
-        '-ig', '--use-gitignore',
-        action='store_true',
-        help='Auto-discover and use .gitignore file in directory'
-    )
-
-    args = parser.parse_args()
-
-    if args.exclude_dirs is None:
-        args.exclude_dirs = []
-    if args.exclude_names is None:
-        args.exclude_names = []
-    if args.exclude_patterns is None:
-        args.exclude_patterns = []
-
-    if args.directories is None:
-        args.directories = []
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_arguments(argv)
+    _configure_logging(args.output, verbose=args.verbose)
 
     if args.language and not LANGDETECT_AVAILABLE:
-        print("Warning: langdetect not installed. Language detection disabled.")
-        print("Install with: pip install langdetect")
-        args.language = None
+        logger.warning("langdetect not installed. Language filter disabled. Install with: pip install langdetect")
 
-    processor = CommentProcessor(args)
-    processor.process_files()
-
-    return 0
+    try:
+        config = create_config_from_args(args)
+        processor = CommentProcessor(config)
+        result = processor.process_files()
 
 
-if __name__ == '__main__':
-    exit(main())
+        if not config.log_file and not config.preview_mode:
+            if config.preview_mode and config.remove_comments:
+                action = "Would remove"
+            elif config.remove_comments:
+                action = "Removed"
+            else:
+                action = "Found"
+            print(f"\n{action} {result['removed_comments']} comments in {result['total_files']} files")
+
+        return 0
+
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user")
+        return 130
+    except Exception as e:
+        logger.error("Fatal error: %s", e)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
