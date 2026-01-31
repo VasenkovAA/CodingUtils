@@ -6,6 +6,8 @@
 
 # CodingUtils
 
+[![CI](https://github.com/VasenkovAA/CodingUtils/actions/workflows/run_tests.yml/badge.svg)](https://github.com/VasenkovAA/CodingUtils/actions/workflows/run_tests.yml)
+
 Набор небольших CLI‑утилит на Python для анализа и документирования кодовой базы: просмотр структуры проекта, извлечение/удаление комментариев и объединение файлов в один “снимок”.
 
 Проект рассчитан на использование:
@@ -47,7 +49,7 @@ pip install git+https://github.com/VasenkovAA/CodingUtils.git
 
 ### Вариант 2: разработка локально
 ```bash
-git clone https://github.com/user/CodingUtils.git
+git clone https://github.com/VasenkovAA/CodingUtils.git
 cd CodingUtils
 python -m venv venv
 source venv/bin/activate
