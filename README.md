@@ -49,7 +49,7 @@ pip install git+https://github.com/VasenkovAA/CodingUtils.git
 
 ### Вариант 2: разработка локально
 ```bash
-git clone https://github.com/user/CodingUtils.git
+git clone https://github.com/VasenkovAA/CodingUtils.git
 cd CodingUtils
 python -m venv venv
 source venv/bin/activate
