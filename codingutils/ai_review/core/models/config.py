@@ -132,6 +132,7 @@ class OutputConfig:
 class AIReviewConfig:
     """Полная конфигурация приложения."""
     filter_config: FilterConfig
+    include_patterns: List[str] = field(default_factory=list)
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     prompt: PromptConfig = field(default_factory=PromptConfig)
@@ -148,6 +149,9 @@ class AIReviewConfig:
         errors: List[str] = []
         errors.extend(self.llm.validate())
         errors.extend(self.processing.validate())
+
+        if self.include_patterns and not all(isinstance(p, str) and p.strip() for p in self.include_patterns):
+            errors.append("include_patterns must be a list of non-empty strings")
 
         if self.llm.context_window is not None:
             if (self.processing.max_input_tokens + self.llm.max_output_tokens) > self.llm.context_window:
