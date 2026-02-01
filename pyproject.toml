@@ -17,6 +17,7 @@ dev = [
     "pytest>=6.0",
     "black>=21.0",
     "flake8>=3.9",
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]
