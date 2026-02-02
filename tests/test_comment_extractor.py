@@ -606,3 +606,276 @@ def test_main_fatal_error(monkeypatch, tmp_path):
     monkeypatch.setattr(ce, "CommentProcessor", DummyProcessor)
     rc = ce.main([str(tmp_path)])
     assert rc == 1
+
+
+# =============================================================================
+# Jupyter Notebook (.ipynb) tests
+# =============================================================================
+
+def test_ipynb_basic_processing(tmp_path, monkeypatch):
+    monkeypatch.setattr(ce.FileContentDetector, "detect_file_type", lambda _p: ce.FileType.TEXT)
+    
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "execution_count": 1,
+                "source": ["# Comment in Python\n", "print('Hello')\n", "x = 1 + 2  # calculation"]
+            }
+        ],
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}
+        },
+        "nbformat": 4,
+        "nbformat_minor": 4
+    }
+    
+    notebook_path = tmp_path / "test.ipynb"
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    
+    config = make_config(tmp_path, include_pattern="*.ipynb", remove_comments=False)
+    proc = ce.CommentProcessor(config)
+    
+    removed, matches = proc.process_file(notebook_path)
+    
+    assert removed == 0
+    assert len(matches) == 2
+    assert any("Comment in Python" in m.text for m in matches)
+    assert any("calculation" in m.text for m in matches)
+
+
+def test_ipynb_remove_comments(tmp_path, monkeypatch):
+    monkeypatch.setattr(ce.FileContentDetector, "detect_file_type", lambda _p: ce.FileType.TEXT)
+    
+    original_content = "# Comment\nprint('Hello')\n"
+    notebook = {
+        "cells": [{
+            "cell_type": "code",
+            "execution_count": 1,
+            "source": original_content.splitlines(keepends=True)
+        }],
+        "metadata": {"kernelspec": {"name": "python3"}},
+        "nbformat": 4,
+        "nbformat_minor": 4
+    }
+    
+    notebook_path = tmp_path / "test.ipynb"
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    
+    config = make_config(tmp_path, include_pattern="*.ipynb", remove_comments=True, preview_mode=False)
+    proc = ce.CommentProcessor(config)
+    
+    removed, matches = proc.process_file(notebook_path)
+    
+    assert removed == 1
+    assert len(matches) == 1
+    
+    modified_content = json.loads(notebook_path.read_text(encoding="utf-8"))
+    cell_source = modified_content["cells"][0]["source"]
+    if isinstance(cell_source, list):
+        cell_text = "".join(cell_source)
+    else:
+        cell_text = cell_source
+    
+    assert "# Comment" not in cell_text
+    assert "print('Hello')" in cell_text
+
+
+def test_ipynb_preview_mode_no_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(ce.FileContentDetector, "detect_file_type", lambda _p: ce.FileType.TEXT)
+    
+    original_source = "# Comment\nprint('Hello')\n"
+    notebook = {
+        "cells": [{
+            "cell_type": "code",
+            "execution_count": 1,
+            "source": original_source.splitlines(keepends=True)
+        }],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4
+    }
+    
+    notebook_path = tmp_path / "test.ipynb"
+    original_json = json.dumps(notebook)
+    notebook_path.write_text(original_json, encoding="utf-8")
+    
+    config = make_config(tmp_path, include_pattern="*.ipynb", remove_comments=True, preview_mode=True)
+    proc = ce.CommentProcessor(config)
+    
+    removed, matches = proc.process_file(notebook_path)
+    
+    assert removed == 1
+    assert len(matches) == 1
+    
+    assert notebook_path.read_text(encoding="utf-8") == original_json
+
+
+def test_ipynb_different_cell_types(tmp_path, monkeypatch):
+    monkeypatch.setattr(ce.FileContentDetector, "detect_file_type", lambda _p: ce.FileType.TEXT)
+    
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "source": ["# This is markdown, not processed"]
+            },
+            {
+                "cell_type": "raw",
+                "source": ["RAW data, ignored"]
+            },
+            {
+                "cell_type": "code",
+                "execution_count": 1,
+                "source": ["# Comment in code cell\n", "x = 1"]
+            }
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4
+    }
+    
+    notebook_path = tmp_path / "test.ipynb"
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    
+    config = make_config(tmp_path, include_pattern="*.ipynb", remove_comments=False)
+    proc = ce.CommentProcessor(config)
+    
+    removed, matches = proc.process_file(notebook_path)
+    
+    assert len(matches) == 1
+    assert matches[0].text == "Comment in code cell"
+
+
+def test_ipynb_malformed_json_handling(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(ce.FileContentDetector, "detect_file_type", lambda _p: ce.FileType.TEXT)
+    
+    notebook_path = tmp_path / "bad.ipynb"
+    notebook_path.write_text("{ invalid json }", encoding="utf-8")
+    
+    config = make_config(tmp_path, include_pattern="*.ipynb", remove_comments=False)
+    proc = ce.CommentProcessor(config)
+    
+    removed, matches = proc.process_file(notebook_path)
+    
+    assert removed == 0
+    assert len(matches) == 0
+    assert "Invalid JSON" in caplog.text or "ERROR" in caplog.text
+
+
+def test_ipynb_unicode_support(tmp_path, monkeypatch):
+    monkeypatch.setattr(ce.FileContentDetector, "detect_file_type", lambda _p: ce.FileType.TEXT)
+    
+    notebook = {
+        "cells": [{
+            "cell_type": "code",
+            "execution_count": 1,
+            "source": ["# Russian comment: привет мир\n", "# Emoji: 🚀 ⭐ 🌟\n", "print('test')"]
+        }],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4
+    }
+    
+    notebook_path = tmp_path / "unicode.ipynb"
+    notebook_path.write_text(json.dumps(notebook, ensure_ascii=False), encoding="utf-8")
+    
+    config = make_config(tmp_path, include_pattern="*.ipynb", remove_comments=False)
+    proc = ce.CommentProcessor(config)
+    
+    removed, matches = proc.process_file(notebook_path)
+    
+    assert len(matches) == 2
+    assert any("Russian comment: привет мир" in m.text for m in matches)
+    assert any("Emoji: 🚀 ⭐ 🌟" in m.text for m in matches)
+
+
+def test_ipynb_with_mixed_file_types(tmp_path, monkeypatch):
+    monkeypatch.setattr(ce.FileContentDetector, "detect_file_type", lambda _p: ce.FileType.TEXT)
+    
+    notebook = {
+        "cells": [{"cell_type": "code", "source": ["# Notebook comment\n", "x = 1"]}],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4
+    }
+    
+    notebook_path = tmp_path / "test.ipynb"
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    
+    py_file = tmp_path / "script.py"
+    py_file.write_text("# Python comment\nprint('test')", encoding="utf-8")
+    
+    config = make_config(tmp_path, include_pattern="*", remove_comments=False)
+    proc = ce.CommentProcessor(config)
+    
+    class MockProgressReporter:
+        def __init__(self, total, description="", **kwargs): pass
+        def __enter__(self): return self
+        def update(self, n=1): pass
+        def __exit__(self, exc_type, exc_val, exc_tb): pass
+    
+    monkeypatch.setattr(ce, "ProgressReporter", MockProgressReporter)
+    
+    result = proc.process_files()
+    
+    assert result["total_files"] == 2
+    assert result["total_comments"] == 2
+
+
+def test_get_kernel_language_from_language_info():
+    processor = ce.CommentProcessor(make_config(Path("/tmp")))
+    
+    notebook_data = {
+        "metadata": {
+            "language_info": {
+                "name": "python",
+                "version": "3.9.0"
+            }
+        }
+    }
+    
+    language = processor._get_kernel_language(notebook_data)
+    assert language == "python"
+
+
+def test_get_kernel_language_from_kernelspec_language():
+    processor = ce.CommentProcessor(make_config(Path("/tmp")))
+    
+    notebook_data = {
+        "metadata": {
+            "kernelspec": {
+                "language": "julia",
+                "name": "julia-1.8"
+            }
+        }
+    }
+    
+    language = processor._get_kernel_language(notebook_data)
+    assert language == "julia"
+
+
+def test_get_kernel_language_from_kernelspec_name():
+    processor = ce.CommentProcessor(make_config(Path("/tmp")))
+    
+    notebook_data = {
+        "metadata": {
+            "kernelspec": {
+                "name": "python3"
+            }
+        }
+    }
+    
+    language = processor._get_kernel_language(notebook_data)
+    assert language == "python"
+
+
+def test_get_kernel_language_fallback_to_python():
+    processor = ce.CommentProcessor(make_config(Path("/tmp")))
+    
+    notebook_data = {
+        "metadata": {}
+    }
+    
+    language = processor._get_kernel_language(notebook_data)
+    assert language == "python"

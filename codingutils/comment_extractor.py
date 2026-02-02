@@ -101,6 +101,7 @@ class CommentMatch:
     end_col: int
     raw: str
     text: str
+    cell_index: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -217,6 +218,7 @@ class CommentScanner:
         *,
         remove: bool,
         should_remove: "callable[[CommentMatch], bool]",
+        cell_index: Optional[int] = None,
     ) -> Tuple[List[str], List[CommentMatch], int]:
         out_lines: List[str] = []
         matches: List[CommentMatch] = []
@@ -225,7 +227,7 @@ class CommentScanner:
         for line_no, raw_line in enumerate(lines, 1):
             if self._in_block:
                 flushed, new_matches, removed_delta = self._process_line_in_block(
-                    line_no, raw_line, remove=remove, should_remove=should_remove
+                    line_no, raw_line, remove=remove, should_remove=should_remove, cell_index=cell_index
                 )
                 out_lines.extend(flushed)
                 matches.extend(new_matches)
@@ -233,7 +235,7 @@ class CommentScanner:
                 continue
 
             flushed, new_matches, removed_delta = self._process_line_no_block(
-                line_no, raw_line, remove=remove, should_remove=should_remove
+                line_no, raw_line, remove=remove, should_remove=should_remove, cell_index=cell_index
             )
             out_lines.extend(flushed)
             matches.extend(new_matches)
@@ -259,6 +261,7 @@ class CommentScanner:
         *,
         remove: bool,
         should_remove: "callable[[CommentMatch], bool]",
+        cell_index: Optional[int] = None,
     ) -> Tuple[List[str], List[CommentMatch], int]:
         nl = "\n" if raw_line.endswith("\n") else ""
         line = raw_line[:-1] if nl else raw_line
@@ -292,6 +295,7 @@ class CommentScanner:
                     end_col=len(out),
                     raw=raw_comment,
                     text=self._clean_comment_text(raw_comment, kind="line"),
+                    cell_index=cell_index,
                 )
                 matches.append(m)
 
@@ -326,6 +330,7 @@ class CommentScanner:
                     end_col=end_col,
                     raw=raw_comment,
                     text=self._clean_comment_text(raw_comment, kind="block"),
+                    cell_index=cell_index,
                 )
                 matches.append(m)
 
@@ -357,6 +362,7 @@ class CommentScanner:
         *,
         remove: bool,
         should_remove: "callable[[CommentMatch], bool]",
+        cell_index: Optional[int] = None,
     ) -> Tuple[List[str], List[CommentMatch], int]:
         nl = "\n" if raw_line.endswith("\n") else ""
         line = raw_line[:-1] if nl else raw_line
@@ -383,6 +389,7 @@ class CommentScanner:
             end_col=end_col,
             raw=raw_comment,
             text=self._clean_comment_text(raw_comment, kind="block"),
+            cell_index=cell_index,
         )
 
         flushed: List[str] = []
@@ -403,7 +410,7 @@ class CommentScanner:
 
 
             rem_lines, rem_matches, rem_removed = self._process_line_no_block(
-                line_no, remainder, remove=True, should_remove=should_remove
+                line_no, remainder, remove=True, should_remove=should_remove, cell_index=cell_index
             )
             flushed.extend(rem_lines)
             matches.extend(rem_matches)
@@ -469,6 +476,52 @@ class CommentScanner:
 
 
 class CommentProcessor:
+    """
+    Process files and extract/remove comments.
+    
+    Added support for Jupyter notebooks with automatic kernel language detection.
+    """
+    KERNEL_LANGUAGE_TO_EXTENSION = {
+        'python': '.py',
+        'python3': '.py',
+        'python2': '.py',
+        'ipython': '.py',
+        'ir': '.r',
+        'r': '.r',
+        'julia': '.jl',
+        'julia-1.0': '.jl',
+        'julia-1.6': '.jl',
+        'scala': '.scala',
+        'java': '.java',
+        'c++': '.cpp',
+        'c++11': '.cpp',
+        'c++14': '.cpp',
+        'c++17': '.cpp',
+        'c++20': '.cpp',
+        'cling-cpp11': '.cpp',
+        'cling-cpp14': '.cpp',
+        'cling-cpp17': '.cpp',
+        'javascript': '.js',
+        'typescript': '.ts',
+        'go': '.go',
+        'rust': '.rs',
+        'ruby': '.rb',
+        'bash': '.sh',
+        'sh': '.sh',
+        'sql': '.sql',
+        'octave': '.m',
+        'matlab': '.m',
+        'php': '.php',
+        'perl': '.pl',
+        'haskell': '.hs',
+        'clojure': '.clj',
+        'groovy': '.groovy',
+        'kotlin': '.kt',
+        'swift': '.swift',
+        'csharp': '.cs',
+        'fsharp': '.fs',
+    }
+
     def __init__(self, config: CommentExtractorConfig) -> None:
         self.config = config
         self.file_walker = self._create_walker(config)
@@ -530,7 +583,8 @@ class CommentProcessor:
 
                     rel = get_relative_path(p)
                     for m in matches:
-                        logger.info("%s:%d: %s", rel, m.start_line, m.text)
+                        cell_info = f" [cell {m.cell_index}]" if m.cell_index is not None else ""
+                        logger.info("%s:%d%s: %s", rel, m.start_line, cell_info, m.text)
                         all_comments.append(
                             {
                                 "file": str(p),
@@ -542,6 +596,7 @@ class CommentProcessor:
                                 "end_col": m.end_col,
                                 "text": m.text,
                                 "raw": m.raw,
+                                "cell_index": m.cell_index,
                             }
                         )
                 except Exception as e:
@@ -562,6 +617,14 @@ class CommentProcessor:
         }
 
     def process_file(self, file_path: Path) -> Tuple[int, List[CommentMatch]]:
+        """
+        Process a file to extract/remove comments.
+        
+        Special handling for .ipynb files with automatic kernel language detection.
+        """
+        if file_path.suffix.lower() == '.ipynb':
+            return self._process_ipynb_file(file_path)
+
         if FileContentDetector.detect_file_type(file_path) != FileType.TEXT:
             logger.debug("Skipping non-text file: %s", file_path)
             return 0, []
@@ -648,6 +711,147 @@ class CommentProcessor:
         if self._cache is not None:
             self._cache[cache_key] = (mtime, result)
         return result
+    
+
+    def _get_kernel_language(self, notebook_data: dict) -> str:
+        """
+        Extract kernel language from Jupyter notebook metadata.
+        
+        Returns the language name in lowercase.
+        """
+        lang_info = notebook_data.get('metadata', {}).get('language_info', {})
+        if 'name' in lang_info:
+            return lang_info['name'].lower()
+        
+        kernelspec = notebook_data.get('metadata', {}).get('kernelspec', {})
+        if 'language' in kernelspec:
+            return kernelspec['language'].lower()
+        
+        if 'name' in kernelspec:
+            kernel_name = kernelspec['name'].lower()
+            if 'python' in kernel_name:
+                return 'python'
+            elif kernel_name.startswith('ir'):
+                return 'r'
+            elif 'julia' in kernel_name:
+                return 'julia'
+            elif 'scala' in kernel_name:
+                return 'scala'
+        
+        logger.debug("Could not determine kernel language, defaulting to Python")
+        return 'python'
+    
+    def _process_ipynb_file(self, file_path: Path) -> Tuple[int, List[CommentMatch]]:
+        """
+        Process a Jupyter notebook file.
+        
+        Automatically detects the kernel language and uses appropriate comment patterns.
+        Only processes code cells.
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                notebook = json.load(f)
+        except json.JSONDecodeError as e:
+            logger.error("Invalid JSON in .ipynb file %s: %s", file_path, e)
+            return 0, []
+        except Exception as e:
+            logger.error("Failed to read .ipynb file %s: %s", file_path, e)
+            return 0, []
+        
+        kernel_lang = self._get_kernel_language(notebook)
+        extension = self.KERNEL_LANGUAGE_TO_EXTENSION.get(kernel_lang, '.py')
+        
+        logger.debug("Detected kernel language '%s' for %s, using comment style for '%s'", 
+                    kernel_lang, file_path.name, extension)
+        
+        style = (
+            CommentStyle.from_override(self.config.comment_symbols)
+            if self.config.comment_symbols
+            else CommentStyle.from_extension(extension)
+        )
+        
+        if not style.line_markers and not style.block_markers:
+            logger.warning("No comment style found for language '%s', defaulting to '#'", kernel_lang)
+            style = CommentStyle(line_markers=('#',), block_markers=())
+        
+        if self.config.remove_comments and kernel_lang in ('python', 'python3', 'python2', 'ipython') and style.block_markers:
+            logger.warning("Removing block comments in Python notebook may remove docstrings: %s", file_path)
+        
+        all_matches = []
+        total_removed = 0
+        modified = False
+        
+        cells = notebook.get('cells', [])
+        for cell_idx, cell in enumerate(cells):
+            if cell.get('cell_type') != 'code':
+                continue
+            
+            source = cell.get('source', [])
+            
+            if isinstance(source, str):
+                lines = source.splitlines(keepends=True)
+            elif isinstance(source, list):
+                lines = []
+                for line in source:
+                    if isinstance(line, str):
+                        if not line.endswith('\n'):
+                            line += '\n'
+                        lines.append(line)
+                    else:
+                        lines.append(str(line) + '\n')
+            else:
+                logger.warning("Unexpected source type in cell %d: %s", cell_idx, type(source))
+                continue
+            
+            if not lines:
+                continue
+            
+            scanner = CommentScanner(style, exclude_comment_pattern=self.config.exclude_comment_pattern)
+            
+            def should_remove(m: CommentMatch) -> bool:
+                if not self.config.remove_comments:
+                    return False
+                return self._should_remove_comment(m.text)
+            
+            out_lines, matches, removed_count = scanner.scan_and_strip(
+                lines,
+                remove=bool(self.config.remove_comments),
+                should_remove=should_remove,
+                cell_index=cell_idx,
+            )
+            
+            all_matches.extend(matches)
+            total_removed += removed_count
+            
+            if removed_count > 0 and self.config.remove_comments and not self.config.preview_mode:
+                modified = True
+                if isinstance(source, str):
+                    cell['source'] = ''.join(out_lines)
+                else:
+                    cell['source'] = out_lines
+        
+        if modified and not self.config.preview_mode:
+            backup_path = None
+            try:
+                if self.config.keep_backups:
+                    backup_path = self._create_persistent_backup(file_path)
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(notebook, f, ensure_ascii=False, indent=1)
+                
+                logger.info("Modified notebook saved: %s", file_path)
+                
+            except Exception as e:
+                logger.error("Failed to write modified notebook %s: %s", file_path, e)
+                if backup_path and backup_path.exists():
+                    try:
+                        shutil.copy2(backup_path, file_path)
+                        logger.info("Restored from backup: %s", backup_path)
+                    except Exception as restore_error:
+                        logger.error("Failed to restore from backup: %s", restore_error)
+                raise
+        
+        return total_removed, all_matches
 
 
 
@@ -778,7 +982,8 @@ class CommentProcessor:
                     f.write(f"\nFILE: {rel_path}\n")
                     f.write("-" * 40 + "\n")
                     for c in items:
-                        f.write(f"{c['kind']} {c['start_line']}:{c['start_col']}: {c['text']}\n")
+                        cell_info = f" [cell {c['cell_index']}]" if c.get('cell_index') is not None else ""
+                        f.write(f"{c['kind']} {c['start_line']}:{c['start_col']}{cell_info}: {c['text']}\n")
                     f.write(f"\nTotal in file: {len(items)}\n")
 
                 f.write("\n" + "=" * 60 + "\n")

@@ -10,6 +10,7 @@ import logging
 import shutil
 import sys
 import time
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -304,6 +305,8 @@ class SmartFileMerger:
         return "\n".join(lines) + "\n"
 
     def _is_binary_fast(self, p: Path) -> bool:
+        if p.suffix.lower() in {".ipynb"}:
+            return False
         if p.suffix.lower() in FileContentDetector.BINARY_EXTENSIONS:
             return True
 
@@ -450,6 +453,9 @@ class SmartFileMerger:
 
 
     def _iter_processed_lines(self, file_path: Path) -> Iterable[str]:
+        if file_path.suffix.lower() == ".ipynb":
+            yield from self._iter_ipynb_lines(file_path)
+            return
 
         try:
             size = file_path.stat().st_size
@@ -510,7 +516,67 @@ class SmartFileMerger:
                 else:
                     yield line + "\n"
 
+    def _iter_ipynb_lines(self, file_path: Path, encoding: str = "utf-8") -> Iterable[str]:
+        try:
+            with open(file_path, "r", encoding=encoding) as f:
+                notebook = json.load(f)
+        except json.JSONDecodeError as e:
+            self.stats["files_failed"] = int(self.stats["files_failed"]) + 1
+            yield f"[ERROR: Invalid JSON in .ipynb file: {e}]\n"
+            return
+        except Exception as e:
+            self.stats["files_failed"] = int(self.stats["files_failed"]) + 1
+            yield f"[ERROR: Failed to read .ipynb file: {e}]\n"
+            return
+        
+        if "cells" not in notebook:
+            yield f"[NOTEBOOK: No cells found in {file_path.name}]\n"
+            return
+        
+        cells_extracted = 0
+        total_cells = len(notebook.get("cells", []))
+        
+        notebook_name = notebook.get("metadata", {}).get("kernelspec", {}).get("display_name", "Jupyter Notebook")
+        yield f"[NOTEBOOK: {file_path.name} ({notebook_name}) - {total_cells} cells]\n"
+        
+        for i, cell in enumerate(notebook.get("cells", []), 1):
+            cell_type = cell.get("cell_type", "unknown")
+            
+            if cell_type in ("markdown", "code"):
+                cells_extracted += 1
+                
+                yield f"\n{'='*40}\n"
+                yield f"Cell {i}: {cell_type.upper()}\n"
+                yield f"{'-'*40}\n"
+                
+                source = cell.get("source", [])
+                
+                if isinstance(source, str):
+                    lines = source.splitlines(keepends=True)
+                elif isinstance(source, list):
+                    lines = []
+                    for line in source:
+                        if isinstance(line, str):
+                            if not line.endswith('\n'):
+                                line += '\n'
+                            lines.append(line)
+                        else:
+                            lines.append(str(line) + '\n')
+                else:
+                    lines = [f"[UNSUPPORTED SOURCE TYPE: {type(source)}]\n"]
+                
+                for line in lines:
+                    yield line
+                
+                if cell_type == "code" and cell.get("execution_count") is not None:
+                    yield f"\n# Execution count: {cell['execution_count']}\n"
+        
+        yield f"\n{'='*40}\n"
+        yield f"Notebook summary: {cells_extracted}/{total_cells} cells extracted\n"
+
     def _is_binary(self, file_path: Path) -> bool:
+        if file_path.suffix.lower() == ".ipynb":
+            return False
         if file_path.suffix.lower() in FileContentDetector.BINARY_EXTENSIONS:
             return True
         return FileContentDetector.detect_file_type(file_path) == FileType.BINARY
