@@ -44,7 +44,6 @@ class PromptEngineer:
 
         variables = self._variables(element)
 
-        # контекст — только если реально используется в шаблоне
         if self.config.include_context and "{{context}}" in user_tpl:
             try:
                 variables["context"] = element.file_path.read_text(encoding="utf-8", errors="replace")
