@@ -1,0 +1,13 @@
+Please review the following {{element_type}} named "{{element_name}}" from {{filepath}}.
+
+Focus on:
+- correctness
+- readability
+- maintainability
+- potential bugs
+- security concerns (if any)
+
+Return a structured review with bullet points and concrete suggestions.
+
+CODE:
+{{code}}
