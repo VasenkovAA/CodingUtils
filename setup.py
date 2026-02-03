@@ -7,7 +7,7 @@ long_description = (here / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="codingutils",
-    version="1.3.0",
+    version="2.0.0",
     description="A comprehensive set of Python utilities for code analysis and file management",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -23,15 +23,17 @@ setup(
     ],
     keywords="code, comments, file management, project structure, utilities",
     packages=find_packages(),
-    python_requires=">=3.9, <4",
+    python_requires=">=3.10, <4",
     install_requires=[
         "langdetect>=1.0.9",
+        "PyYAML>=6.0",
     ],
     entry_points={
         "console_scripts": [
             "comment-extractor=codingutils.comment_extractor:main",
             "file-merger=codingutils.merger:main",
             "tree-generator=codingutils.tree_generater:main",
+            "ai-review=codingutils.ai_reviewer:main",
         ],
     },
     project_urls={
