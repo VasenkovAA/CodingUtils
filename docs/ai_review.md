@@ -569,3 +569,43 @@ profiles:
       include_context: true
       context_files: [".env*", "config/*.yml", "config/*.yaml"]
 ```
+
+
+
+
+# Пример: запуск ai-review с конфигом из examples/ai-review
+## Вариант A (рекомендуется): запуск прямо из папки примера
+
+```Bash
+# из корня репозитория
+cd examples/ai-review
+
+# 1) быстрый прогон без LLM (проверка пайплайна)
+ai-review ./src --profile dry-run
+
+# 2) реальный прогон через LM Studio + oos-20B
+ai-review ./src --profile oos-20b-local
+```
+Ожидаемый результат:
+
+    появится examples/ai-review/reviews/
+    внутри будут summary.md, .review_hashes.json и папки с ревью.
+
+## Вариант B: запуск из корня репозитория с явным --config
+
+Удобно для CI/документации, но выходная директория будет относиться к cwd (корню репо), если в конфиге указано ./reviews.
+
+```Bash
+# из корня репозитория
+ai-review examples/ai-review/src \
+  --config examples/ai-review/.codingutils.yaml \
+  --profile dry-run
+```
+Для реального LLM:
+
+```Bash
+
+ai-review examples/ai-review/src \
+  --config examples/ai-review/.codingutils.yaml \
+  --profile oos-20b-local
+```
