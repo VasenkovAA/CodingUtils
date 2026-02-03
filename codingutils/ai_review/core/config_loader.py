@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import yaml
 
@@ -160,6 +160,15 @@ def load_ai_review_config(
         config_dir = path.parent
 
     globals_cfg = doc.get("globals") or {}
+        # Support top-level `plugins:` (not under globals) as global defaults.
+    # This is needed for configs like:
+    # plugins:
+    #   auto_discover: true
+    #   plugin_dirs: [...]
+    root_plugins = doc.get("plugins") or {}
+    if root_plugins:
+        # root_plugins -> base, globals_cfg -> override
+        globals_cfg = _deep_merge({"plugins": root_plugins}, globals_cfg)
     profile_cfg: Dict[str, Any] = {}
     if profile:
         profile_cfg = _resolve_profile(doc, profile)
@@ -236,9 +245,33 @@ def load_ai_review_config(
     include_patterns = merged.get("include_patterns") or []
     if isinstance(include_patterns, str):
         include_patterns = [include_patterns]
+    plugins_cfg = dict(merged.get("plugins") or {})
+    auto_discover = bool(plugins_cfg.get("auto_discover", True))
+    plugin_dirs_raw = plugins_cfg.get("plugin_dirs") or []
+    if isinstance(plugin_dirs_raw, str):
+        plugin_dirs_raw = [plugin_dirs_raw]
+    plugin_dirs = [Path(p).expanduser() for p in plugin_dirs_raw if isinstance(p, str) and p.strip()]
+    # plugins
+    plugins_cfg = dict(merged.get("plugins") or {})
+    auto_discover = bool(plugins_cfg.get("auto_discover", True))
+    plugin_dirs_raw = plugins_cfg.get("plugin_dirs") or []
+    if isinstance(plugin_dirs_raw, str):
+        plugin_dirs_raw = [plugin_dirs_raw]
+
+    plugin_dirs: List[Path] = []
+    for item in plugin_dirs_raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        p = Path(item).expanduser()
+        if config_dir and not p.is_absolute():
+            p = (config_dir / p).resolve()
+        plugin_dirs.append(p)
+
     return AIReviewConfig(
         filter_config=filter_config,
         include_patterns=[p for p in include_patterns if isinstance(p, str) and p.strip()],
+        auto_discover_plugins=auto_discover,
+        plugin_dirs=plugin_dirs,
         llm=llm,
         prompt=prompt,
         processing=processing,

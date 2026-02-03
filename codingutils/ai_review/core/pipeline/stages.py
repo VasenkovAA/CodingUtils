@@ -17,6 +17,8 @@ from ...plugins.registry import PluginRegistry
 
 from .base import PipelineContext, PipelineError, PipelineStage
 
+from codingutils.common_utils import GitIgnoreParser
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,12 +40,26 @@ class FileDiscoveryStage(PipelineStage):
     def __init__(self, config: AIReviewConfig):
         super().__init__("file_discovery")
         self.config = config
-        self.walker = FileSystemWalker(config.filter_config)
+
+    def _create_gitignore_parser(self, roots: List[Path]) -> Optional[GitIgnoreParser]:
+        fc = self.config.filter_config
+        if not (fc.use_gitignore or fc.custom_gitignore):
+            return None
+
+        root = roots[0] if roots else Path.cwd()
+        parser = GitIgnoreParser(root_dir=root)
+        if fc.custom_gitignore:
+            parser.load_from_file(fc.custom_gitignore)
+        else:
+            parser.load_from_file()
+        return parser
 
     async def process(self, directories: List[Path], context: PipelineContext) -> List[FileArtifact]:
         roots = [Path(d).resolve() for d in directories]
-        files = self.walker.find_files(roots)
+        gitignore = self._create_gitignore_parser(roots)
+        walker = FileSystemWalker(self.config.filter_config, gitignore_parser=gitignore)
 
+        files = walker.find_files(roots)
         context.metrics["files_found"] = len(files)
 
         include_patterns = list(self.config.include_patterns or [])

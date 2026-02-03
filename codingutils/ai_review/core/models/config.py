@@ -134,6 +134,9 @@ class AIReviewConfig:
     filter_config: FilterConfig
     include_patterns: List[str] = field(default_factory=list)
 
+    auto_discover_plugins: bool = True
+    plugin_dirs: List[Path] = field(default_factory=list)
+
     llm: LLMConfig = field(default_factory=LLMConfig)
     prompt: PromptConfig = field(default_factory=PromptConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
