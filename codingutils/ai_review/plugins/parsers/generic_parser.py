@@ -22,7 +22,7 @@ class GenericParser(BaseParser):
         return []
 
     def parse_functions(self, file_path: Path) -> List[CodeElement]:
-        return []
+        return [self.parse_whole_file(file_path)]
 
     def parse_classes(self, file_path: Path) -> List[CodeElement]:
-        return []
+        return [self.parse_whole_file(file_path)]

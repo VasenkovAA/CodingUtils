@@ -9,10 +9,11 @@ from .formatters.markdown_formatter import MarkdownFormatter
 
 from .llm.mock_provider import MockLLMProvider
 from .llm.openai_compatible import OpenAIClient, LMStudioClient
-
+from .parsers.javascript_parser import JavaScriptParser
 
 def register_builtin_plugins(registry: PluginRegistry) -> PluginRegistry:
     registry.register_parser(PythonParser)
+    registry.register_parser(JavaScriptParser)
     registry.register_parser(GenericParser)
 
     registry.register_formatter(MarkdownFormatter)
