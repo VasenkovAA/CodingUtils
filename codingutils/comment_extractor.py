@@ -7,6 +7,13 @@ Features:
 - Preview mode: shows what would be removed, does not change files
 - Optional language filter via langdetect
 - Export found comments to .txt/.json/.jsonl
+
+Extended (backward compatible):
+- Multiple include patterns: -p "*.py" "*.txt" or -p "*.py *.txt"
+- Per-directory recursion: -dr dir1 -d dir2
+- Split streams for GUI wrappers: --split-streams
+  - stdout: extracted comments output
+  - stderr: logs/warnings/progress/errors
 """
 
 from __future__ import annotations
@@ -15,10 +22,11 @@ import argparse
 import json
 import logging
 import re
+import shlex
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -35,6 +43,7 @@ from codingutils.common_utils import (
 
 try:
     from langdetect import detect, LangDetectException
+
     LANGDETECT_AVAILABLE = True
 except ImportError:
     LANGDETECT_AVAILABLE = False
@@ -43,10 +52,7 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
-
-
-
-
+OUTPUT_LOGGER_NAME = "codingutils.comment_extractor.output"
 
 
 @dataclass(slots=True)
@@ -71,25 +77,35 @@ class CommentExtractorConfig(FilterConfig):
     use_cache: bool = True
     min_langdetect_len: int = 20
 
-
     keep_backups: bool = False
     backup_dir: Optional[Path] = None
     overwrite_backups: bool = False
 
-    def __post_init__(self) -> None:
+    # NEW
+    directory_recursion: Dict[Path, bool] = field(default_factory=dict)
+    split_streams: bool = False
 
+    def __post_init__(self) -> None:
         FilterConfig.__post_init__(self)
 
         if self.language_filter and not LANGDETECT_AVAILABLE:
             logger.warning("langdetect not available. Install with: pip install langdetect")
 
-
         if self.backup_dir is not None:
             self.keep_backups = True
+            try:
+                self.backup_dir = Path(self.backup_dir).resolve()
+            except Exception:
+                self.backup_dir = Path(self.backup_dir)
 
-
-
-
+        if self.directory_recursion:
+            normalized: Dict[Path, bool] = {}
+            for k, v in self.directory_recursion.items():
+                try:
+                    normalized[Path(k).resolve()] = bool(v)
+                except Exception:
+                    normalized[Path(k)] = bool(v)
+            self.directory_recursion = normalized
 
 
 @dataclass(slots=True)
@@ -130,10 +146,6 @@ class CommentStyle:
         if len(parts) == 2:
             return CommentStyle(line_markers=(), block_markers=((parts[0], parts[1]),))
         return CommentStyle(line_markers=(parts[0],), block_markers=((parts[1], parts[2]),))
-
-
-
-
 
 
 class _StringScanner:
@@ -181,10 +193,6 @@ class _StringScanner:
         return -1, None
 
 
-
-
-
-
 class CommentScanner:
     """
     Extract and optionally strip comments.
@@ -202,7 +210,6 @@ class CommentScanner:
     def __init__(self, style: CommentStyle, *, exclude_comment_pattern: Optional[str] = None) -> None:
         self.style = style
         self.exclude_comment_pattern = exclude_comment_pattern
-
 
         self._in_block = False
         self._block_end_tok = ""
@@ -241,11 +248,9 @@ class CommentScanner:
             matches.extend(new_matches)
             removed_count += removed_delta
 
-
         if self._in_block:
             logger.warning("Unclosed block comment starting at line %d", self._block_start_line)
             if remove:
-
                 out_lines.append(self._block_prefix_before_start.rstrip() + "\n")
                 out_lines.extend(["\n"] * max(0, len(self._block_original_lines) - 1))
             else:
@@ -280,11 +285,9 @@ class CommentScanner:
             if pos == -1 or tok is None:
                 break
 
-
             if tok in self.style.line_markers:
                 raw_comment = out[pos:]
                 if self._is_excluded(raw_comment):
-
                     return [raw_line], matches, removed
 
                 m = CommentMatch(
@@ -306,7 +309,6 @@ class CommentScanner:
 
                 i = pos + len(tok)
                 continue
-
 
             end_tok = self._end_for_start(tok)
             if not end_tok:
@@ -341,7 +343,6 @@ class CommentScanner:
                 else:
                     i = end_col
                 continue
-
 
             self._enter_block_state(
                 end_tok=end_tok,
@@ -408,7 +409,6 @@ class CommentScanner:
             middle_count = (line_no - self._block_start_line) - 1
             flushed.extend(["\n"] * max(0, middle_count))
 
-
             rem_lines, rem_matches, rem_removed = self._process_line_no_block(
                 line_no, remainder, remove=True, should_remove=should_remove, cell_index=cell_index
             )
@@ -471,65 +471,63 @@ class CommentScanner:
         return s.strip()
 
 
-
-
-
-
 class CommentProcessor:
     """
     Process files and extract/remove comments.
-    
-    Added support for Jupyter notebooks with automatic kernel language detection.
+
+    Includes support for Jupyter notebooks (.ipynb): processes code cells only.
     """
+
     KERNEL_LANGUAGE_TO_EXTENSION = {
-        'python': '.py',
-        'python3': '.py',
-        'python2': '.py',
-        'ipython': '.py',
-        'ir': '.r',
-        'r': '.r',
-        'julia': '.jl',
-        'julia-1.0': '.jl',
-        'julia-1.6': '.jl',
-        'scala': '.scala',
-        'java': '.java',
-        'c++': '.cpp',
-        'c++11': '.cpp',
-        'c++14': '.cpp',
-        'c++17': '.cpp',
-        'c++20': '.cpp',
-        'cling-cpp11': '.cpp',
-        'cling-cpp14': '.cpp',
-        'cling-cpp17': '.cpp',
-        'javascript': '.js',
-        'typescript': '.ts',
-        'go': '.go',
-        'rust': '.rs',
-        'ruby': '.rb',
-        'bash': '.sh',
-        'sh': '.sh',
-        'sql': '.sql',
-        'octave': '.m',
-        'matlab': '.m',
-        'php': '.php',
-        'perl': '.pl',
-        'haskell': '.hs',
-        'clojure': '.clj',
-        'groovy': '.groovy',
-        'kotlin': '.kt',
-        'swift': '.swift',
-        'csharp': '.cs',
-        'fsharp': '.fs',
+        "python": ".py",
+        "python3": ".py",
+        "python2": ".py",
+        "ipython": ".py",
+        "ir": ".r",
+        "r": ".r",
+        "julia": ".jl",
+        "julia-1.0": ".jl",
+        "julia-1.6": ".jl",
+        "scala": ".scala",
+        "java": ".java",
+        "c++": ".cpp",
+        "c++11": ".cpp",
+        "c++14": ".cpp",
+        "c++17": ".cpp",
+        "c++20": ".cpp",
+        "cling-cpp11": ".cpp",
+        "cling-cpp14": ".cpp",
+        "cling-cpp17": ".cpp",
+        "javascript": ".js",
+        "typescript": ".ts",
+        "go": ".go",
+        "rust": ".rs",
+        "ruby": ".rb",
+        "bash": ".sh",
+        "sh": ".sh",
+        "sql": ".sql",
+        "octave": ".m",
+        "matlab": ".m",
+        "php": ".php",
+        "perl": ".pl",
+        "haskell": ".hs",
+        "clojure": ".clj",
+        "groovy": ".groovy",
+        "kotlin": ".kt",
+        "swift": ".swift",
+        "csharp": ".cs",
+        "fsharp": ".fs",
     }
 
     def __init__(self, config: CommentExtractorConfig) -> None:
         self.config = config
         self.file_walker = self._create_walker(config)
 
-
         self._cache: Optional[Dict[str, Tuple[float, Tuple[int, List[CommentMatch]]]]] = (
             {} if config.use_cache else None
         )
+
+        self.out_logger = logging.getLogger(OUTPUT_LOGGER_NAME)
 
         if self.config.language_filter and not LANGDETECT_AVAILABLE:
             logger.warning("Language filter requested but langdetect is not installed; filter will be ignored.")
@@ -551,7 +549,12 @@ class CommentProcessor:
 
     def find_files(self) -> List[Path]:
         roots = [Path(d).resolve() for d in (self.config.directories or ["."])]
-        files = self.file_walker.find_files(roots, recursive=self.config.recursive)
+
+        if self.config.directory_recursion:
+            rec_map = {k.resolve(): v for k, v in self.config.directory_recursion.items()}
+            files = self.file_walker.find_files(roots, recursive=rec_map)
+        else:
+            files = self.file_walker.find_files(roots, recursive=self.config.recursive)
 
         stats = self.file_walker.stats
         logger.info("Found %d files to process", len(files))
@@ -574,7 +577,9 @@ class CommentProcessor:
         total_comments = 0
         all_comments: List[Dict[str, Any]] = []
 
-        with ProgressReporter(total=len(files), description="Extracting comments") as progress:
+        progress_stream = sys.stderr if self.config.split_streams else sys.stdout
+
+        with ProgressReporter(total=len(files), description="Extracting comments", stream=progress_stream) as progress:
             for p in files:
                 try:
                     removed, matches = self.process_file(p)
@@ -584,7 +589,8 @@ class CommentProcessor:
                     rel = get_relative_path(p)
                     for m in matches:
                         cell_info = f" [cell {m.cell_index}]" if m.cell_index is not None else ""
-                        logger.info("%s:%d%s: %s", rel, m.start_line, cell_info, m.text)
+                        self.out_logger.info("%s:%d%s: %s", rel, m.start_line, cell_info, m.text)
+
                         all_comments.append(
                             {
                                 "file": str(p),
@@ -617,12 +623,7 @@ class CommentProcessor:
         }
 
     def process_file(self, file_path: Path) -> Tuple[int, List[CommentMatch]]:
-        """
-        Process a file to extract/remove comments.
-        
-        Special handling for .ipynb files with automatic kernel language detection.
-        """
-        if file_path.suffix.lower() == '.ipynb':
+        if file_path.suffix.lower() == ".ipynb":
             return self._process_ipynb_file(file_path)
 
         if FileContentDetector.detect_file_type(file_path) != FileType.TEXT:
@@ -668,7 +669,6 @@ class CommentProcessor:
                 return False
             return self._should_remove_comment(m.text)
 
-
         remove_flag = bool(self.config.remove_comments)
 
         out_lines, matches, removed_count = scanner.scan_and_strip(
@@ -680,7 +680,6 @@ class CommentProcessor:
         if removed_count > 0 and self.config.remove_comments and not self.config.preview_mode:
             backup_path = None
             try:
-
                 if self.config.keep_backups:
                     backup_path = self._create_persistent_backup(file_path)
 
@@ -691,7 +690,6 @@ class CommentProcessor:
                     backup=False,
                 )
                 if not ok:
-
                     if backup_path and backup_path.exists():
                         try:
                             shutil.copy2(backup_path, file_path)
@@ -699,7 +697,6 @@ class CommentProcessor:
                             pass
                     raise RuntimeError(f"Failed to write updated file: {file_path}")
             except Exception:
-
                 if backup_path and backup_path.exists():
                     try:
                         shutil.copy2(backup_path, file_path)
@@ -711,45 +708,33 @@ class CommentProcessor:
         if self._cache is not None:
             self._cache[cache_key] = (mtime, result)
         return result
-    
 
     def _get_kernel_language(self, notebook_data: dict) -> str:
-        """
-        Extract kernel language from Jupyter notebook metadata.
-        
-        Returns the language name in lowercase.
-        """
-        lang_info = notebook_data.get('metadata', {}).get('language_info', {})
-        if 'name' in lang_info:
-            return lang_info['name'].lower()
-        
-        kernelspec = notebook_data.get('metadata', {}).get('kernelspec', {})
-        if 'language' in kernelspec:
-            return kernelspec['language'].lower()
-        
-        if 'name' in kernelspec:
-            kernel_name = kernelspec['name'].lower()
-            if 'python' in kernel_name:
-                return 'python'
-            elif kernel_name.startswith('ir'):
-                return 'r'
-            elif 'julia' in kernel_name:
-                return 'julia'
-            elif 'scala' in kernel_name:
-                return 'scala'
-        
+        lang_info = notebook_data.get("metadata", {}).get("language_info", {})
+        if "name" in lang_info:
+            return str(lang_info["name"]).lower()
+
+        kernelspec = notebook_data.get("metadata", {}).get("kernelspec", {})
+        if "language" in kernelspec:
+            return str(kernelspec["language"]).lower()
+
+        if "name" in kernelspec:
+            kernel_name = str(kernelspec["name"]).lower()
+            if "python" in kernel_name:
+                return "python"
+            if kernel_name.startswith("ir"):
+                return "r"
+            if "julia" in kernel_name:
+                return "julia"
+            if "scala" in kernel_name:
+                return "scala"
+
         logger.debug("Could not determine kernel language, defaulting to Python")
-        return 'python'
-    
+        return "python"
+
     def _process_ipynb_file(self, file_path: Path) -> Tuple[int, List[CommentMatch]]:
-        """
-        Process a Jupyter notebook file.
-        
-        Automatically detects the kernel language and uses appropriate comment patterns.
-        Only processes code cells.
-        """
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 notebook = json.load(f)
         except json.JSONDecodeError as e:
             logger.error("Invalid JSON in .ipynb file %s: %s", file_path, e)
@@ -757,90 +742,94 @@ class CommentProcessor:
         except Exception as e:
             logger.error("Failed to read .ipynb file %s: %s", file_path, e)
             return 0, []
-        
+
         kernel_lang = self._get_kernel_language(notebook)
-        extension = self.KERNEL_LANGUAGE_TO_EXTENSION.get(kernel_lang, '.py')
-        
-        logger.debug("Detected kernel language '%s' for %s, using comment style for '%s'", 
-                    kernel_lang, file_path.name, extension)
-        
+        extension = self.KERNEL_LANGUAGE_TO_EXTENSION.get(kernel_lang, ".py")
+
+        logger.debug(
+            "Detected kernel language '%s' for %s, using comment style for '%s'",
+            kernel_lang,
+            file_path.name,
+            extension,
+        )
+
         style = (
             CommentStyle.from_override(self.config.comment_symbols)
             if self.config.comment_symbols
             else CommentStyle.from_extension(extension)
         )
-        
+
         if not style.line_markers and not style.block_markers:
             logger.warning("No comment style found for language '%s', defaulting to '#'", kernel_lang)
-            style = CommentStyle(line_markers=('#',), block_markers=())
-        
-        if self.config.remove_comments and kernel_lang in ('python', 'python3', 'python2', 'ipython') and style.block_markers:
+            style = CommentStyle(line_markers=("#",), block_markers=())
+
+        if self.config.remove_comments and kernel_lang in ("python", "python3", "python2", "ipython") and style.block_markers:
             logger.warning("Removing block comments in Python notebook may remove docstrings: %s", file_path)
-        
-        all_matches = []
+
+        all_matches: List[CommentMatch] = []
         total_removed = 0
         modified = False
-        
-        cells = notebook.get('cells', [])
+
+        cells = notebook.get("cells", [])
         for cell_idx, cell in enumerate(cells):
-            if cell.get('cell_type') != 'code':
+            if cell.get("cell_type") != "code":
                 continue
-            
-            source = cell.get('source', [])
-            
+
+            source = cell.get("source", [])
+
             if isinstance(source, str):
                 lines = source.splitlines(keepends=True)
             elif isinstance(source, list):
                 lines = []
                 for line in source:
                     if isinstance(line, str):
-                        if not line.endswith('\n'):
-                            line += '\n'
+                        if not line.endswith("\n"):
+                            line += "\n"
                         lines.append(line)
                     else:
-                        lines.append(str(line) + '\n')
+                        lines.append(str(line) + "\n")
             else:
                 logger.warning("Unexpected source type in cell %d: %s", cell_idx, type(source))
                 continue
-            
+
             if not lines:
                 continue
-            
+
             scanner = CommentScanner(style, exclude_comment_pattern=self.config.exclude_comment_pattern)
-            
+
             def should_remove(m: CommentMatch) -> bool:
                 if not self.config.remove_comments:
                     return False
                 return self._should_remove_comment(m.text)
-            
+
             out_lines, matches, removed_count = scanner.scan_and_strip(
                 lines,
                 remove=bool(self.config.remove_comments),
                 should_remove=should_remove,
                 cell_index=cell_idx,
             )
-            
+
             all_matches.extend(matches)
             total_removed += removed_count
-            
+
             if removed_count > 0 and self.config.remove_comments and not self.config.preview_mode:
                 modified = True
                 if isinstance(source, str):
-                    cell['source'] = ''.join(out_lines)
+                    cell["source"] = "".join(out_lines)
                 else:
-                    cell['source'] = out_lines
-        
+                    cell["source"] = out_lines
+
         if modified and not self.config.preview_mode:
             backup_path = None
             try:
                 if self.config.keep_backups:
                     backup_path = self._create_persistent_backup(file_path)
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
+
+                with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(notebook, f, ensure_ascii=False, indent=1)
-                
+
                 logger.info("Modified notebook saved: %s", file_path)
-                
+
             except Exception as e:
                 logger.error("Failed to write modified notebook %s: %s", file_path, e)
                 if backup_path and backup_path.exists():
@@ -850,21 +839,15 @@ class CommentProcessor:
                     except Exception as restore_error:
                         logger.error("Failed to restore from backup: %s", restore_error)
                 raise
-        
+
         return total_removed, all_matches
 
-
-
-
-
     def _backup_base_dir(self) -> Path:
-
         if self.config.directories:
             return Path(self.config.directories[0]).resolve()
         return Path.cwd().resolve()
 
     def _default_adjacent_backup_path(self, file_path: Path) -> Path:
-
         return file_path.with_name(file_path.name + ".bak")
 
     def _target_backup_path(self, file_path: Path) -> Path:
@@ -883,7 +866,6 @@ class CommentProcessor:
 
     @staticmethod
     def _next_versioned_backup_path(p: Path) -> Path:
-
         i = 1
         while True:
             candidate = Path(str(p) + f".{i}")
@@ -903,7 +885,6 @@ class CommentProcessor:
                 try:
                     target.unlink()
                 except Exception:
-
                     target = self._next_versioned_backup_path(target)
             else:
                 target = self._next_versioned_backup_path(target)
@@ -911,10 +892,6 @@ class CommentProcessor:
         shutil.copy2(file_path, target)
         logger.debug("Backup created: %s", target)
         return target
-
-
-
-
 
     def _should_remove_comment(self, comment_text: str) -> bool:
         if not self.config.language_filter:
@@ -927,7 +904,7 @@ class CommentProcessor:
             return True
 
         try:
-            lang = detect(cleaned)
+            lang = detect(cleaned)  # type: ignore[misc]
             return lang == self.config.language_filter
         except LangDetectException:
             return True
@@ -938,10 +915,6 @@ class CommentProcessor:
         s = re.sub(r"[^\w\s]+", " ", s, flags=re.UNICODE)
         s = re.sub(r"\s+", " ", s).strip()
         return s
-
-
-
-
 
     def _export_comments(self, comments: List[Dict[str, Any]], export_path: Path) -> None:
         export_path = Path(export_path)
@@ -967,7 +940,6 @@ class CommentProcessor:
                 logger.info("Comments exported to: %s", export_path)
                 return
 
-
             with open(export_path, "w", encoding="utf-8") as f:
                 f.write("EXTRACTED COMMENTS REPORT\n")
                 f.write(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -982,7 +954,7 @@ class CommentProcessor:
                     f.write(f"\nFILE: {rel_path}\n")
                     f.write("-" * 40 + "\n")
                     for c in items:
-                        cell_info = f" [cell {c['cell_index']}]" if c.get('cell_index') is not None else ""
+                        cell_info = f" [cell {c['cell_index']}]" if c.get("cell_index") is not None else ""
                         f.write(f"{c['kind']} {c['start_line']}:{c['start_col']}{cell_info}: {c['text']}\n")
                     f.write(f"\nTotal in file: {len(items)}\n")
 
@@ -994,17 +966,18 @@ class CommentProcessor:
         except Exception as e:
             logger.error("Failed to export comments: %s", e)
 
-
-
-
-
     def _log_configuration(self) -> None:
         logger.info("=" * 60)
         logger.info("COMMENT EXTRACTOR CONFIGURATION")
         logger.info("=" * 60)
         logger.info("Directories: %s", ", ".join(self.config.directories or ["."]))
-        logger.info("Pattern: %s", self.config.include_pattern)
-        logger.info("Recursive: %s", self.config.recursive)
+        logger.info("Pattern(s): %s", self.config.include_pattern)
+        logger.info("Recursive (default): %s", self.config.recursive)
+        if self.config.directory_recursion:
+            logger.info("Recursive (per-dir overrides):")
+            for k, v in sorted(self.config.directory_recursion.items(), key=lambda kv: str(kv[0])):
+                logger.info("  - %s: %s", k, "recursive" if v else "non-recursive")
+
         logger.info("Remove comments: %s", self.config.remove_comments)
         logger.info("Preview mode: %s", self.config.preview_mode)
 
@@ -1020,7 +993,11 @@ class CommentProcessor:
 
         if self.config.keep_backups:
             if self.config.backup_dir:
-                logger.info("Backups: enabled (dir=%s, overwrite=%s)", self.config.backup_dir, self.config.overwrite_backups)
+                logger.info(
+                    "Backups: enabled (dir=%s, overwrite=%s)",
+                    self.config.backup_dir,
+                    self.config.overwrite_backups,
+                )
             else:
                 logger.info("Backups: enabled (adjacent, overwrite=%s)", self.config.overwrite_backups)
 
@@ -1043,26 +1020,59 @@ class CommentProcessor:
         logger.info("=" * 60)
 
 
+def _flatten_patterns(values: Sequence[str]) -> List[str]:
+    """
+    Accept patterns from argparse in both styles:
+      -p "*.py" "*.txt"
+      -p "*.py *.txt *.*"
+    """
+    out: List[str] = []
+    for v in values:
+        v = (v or "").strip()
+        if not v:
+            continue
+        try:
+            parts = shlex.split(v)
+        except ValueError:
+            parts = v.split()
+        for p in parts:
+            p = p.strip()
+            if p:
+                out.append(p)
+    return out or ["*"]
 
 
-
-
-def _configure_logging(log_file: Optional[Path], *, verbose: bool) -> None:
+def _configure_logging(log_file: Optional[Path], *, verbose: bool, split_streams: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    handlers: List[logging.Handler] = []
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(level)
-    console.setFormatter(logging.Formatter("%(message)s"))
-    handlers.append(console)
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.handlers.clear()
+
+    diag_stream = sys.stderr if split_streams else sys.stdout
+    diag = logging.StreamHandler(diag_stream)
+    diag.setLevel(level)
+    diag.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(diag)
 
     if log_file:
         fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
         fh.setLevel(logging.INFO)
         fh.setFormatter(logging.Formatter("%(message)s"))
-        handlers.append(fh)
+        root.addHandler(fh)
 
-    logging.basicConfig(level=level, handlers=handlers, force=True)
+    out_logger = logging.getLogger(OUTPUT_LOGGER_NAME)
+    out_logger.setLevel(logging.INFO)
+    out_logger.handlers.clear()
+
+    if split_streams:
+        out_h = logging.StreamHandler(sys.stdout)
+        out_h.setLevel(logging.INFO)
+        out_h.setFormatter(logging.Formatter("%(message)s"))
+        out_logger.addHandler(out_h)
+        out_logger.propagate = False
+    else:
+        out_logger.propagate = True
 
 
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -1071,41 +1081,49 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    parser.add_argument("directories", nargs="*", default=[], help="Directories to process (default: .)")
+    parser.add_argument("-d", "--dir", action="append", dest="dirs_nonrecursive", default=[], help="Add directory (non-recursive)")
+    parser.add_argument("-dr", "--dir-recursive", action="append", dest="dirs_recursive", default=[], help="Add directory (recursive)")
 
-    parser.add_argument("directories", nargs="*", default=["."], help="Directories to process")
-    parser.add_argument("-p", "--pattern", default="*", help='File pattern (e.g. "*.py")')
-    parser.add_argument("-r", "--recursive", action="store_true", help="Search recursively")
+    # Multiple patterns, but we normalize back to string for backward compatibility with tests/tools.
+    parser.add_argument(
+        "-p",
+        "--pattern",
+        nargs="+",
+        default=["*"],
+        help='File pattern(s) (e.g. "*.py" "*.md" "*.*" or "*.py *.txt")',
+    )
 
+    parser.add_argument("-r", "--recursive", action="store_true", help="Search recursively (default recursion)")
+    parser.add_argument("--max-depth", type=int, help="Maximum recursion depth")
 
     parser.add_argument("-c", "--comment-symbols", help='Override: "//" or "/* */" or "// /* */"')
     parser.add_argument("-e", "--exclude-comment-pattern", help='Exclude comments starting with this prefix (e.g. "##")')
     parser.add_argument("-l", "--language", help='Filter removal by comment language (e.g. "en", "ru")')
 
-
     parser.add_argument("--remove-comments", action="store_true", help="Remove comments from files")
     parser.add_argument("--preview", action="store_true", help="Preview without modifying files")
     parser.add_argument("--export-comments", type=Path, help="Export comments (.txt/.json/.jsonl)")
 
-
     parser.add_argument("-ed", "--exclude-dir", action="append", dest="exclude_dirs", help="Exclude directory name")
     parser.add_argument("-en", "--exclude-name", action="append", dest="exclude_names", help="Exclude file wildcard")
     parser.add_argument("-ep", "--exclude-pattern", action="append", dest="exclude_patterns", help="Exclude path wildcard")
-    parser.add_argument("--max-depth", type=int, help="Maximum recursion depth")
-
 
     parser.add_argument("-ig", "--use-gitignore", action="store_true", help="Auto-discover and use .gitignore")
     parser.add_argument("-gi", "--gitignore", type=Path, help="Use a specific .gitignore")
     parser.add_argument("--no-gitignore", action="store_true", help="Ignore .gitignore")
 
-
     parser.add_argument("-o", "--output", type=Path, help="Output log file")
     parser.add_argument("--log-file", type=Path, help="Legacy alias for --output")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
-
+    parser.add_argument(
+        "--split-streams",
+        action="store_true",
+        help="stdout: extracted comments; stderr: logs/progress/warnings/errors (useful for GUI wrappers)",
+    )
 
     parser.add_argument("--no-cache", action="store_true", help="Disable caching")
     parser.add_argument("--min-langdetect-len", type=int, default=20, help="Min length for language detection")
-
 
     parser.add_argument("--keep-backups", action="store_true", help="Keep backups after successful write")
     parser.add_argument("--backup-dir", type=Path, help="Directory to store backups (preserves relative structure)")
@@ -1116,8 +1134,19 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
+
+    # Legacy alias handling
     if args.log_file and not args.output:
         args.output = args.log_file
+
+    # --- Backward compatibility: tests/tools expect args.pattern to be a string ---
+    # If user provided multiple patterns, keep them as a single space-separated string.
+    if isinstance(args.pattern, list):
+        if len(args.pattern) == 1:
+            args.pattern = args.pattern[0]
+        else:
+            args.pattern = " ".join(args.pattern)
+
     return args
 
 
@@ -1125,10 +1154,33 @@ def create_config_from_args(args: argparse.Namespace) -> CommentExtractorConfig:
     use_gitignore = bool(args.use_gitignore) and not bool(args.no_gitignore)
     custom_gitignore = None if args.no_gitignore else args.gitignore
 
+    # args.pattern is normalized to str in parse_arguments()
+    pattern_values = [args.pattern] if isinstance(args.pattern, str) else list(args.pattern)
+    patterns = _flatten_patterns(pattern_values)
+    include_pattern = " ".join(patterns)
+
+    directories: List[str] = []
+    directories.extend(args.directories or [])
+    directories.extend(args.dirs_nonrecursive or [])
+    directories.extend(args.dirs_recursive or [])
+    if not directories:
+        directories = ["."]
+    dir_recursion: Dict[Path, bool] = {}
+    for d in args.dirs_nonrecursive or []:
+        try:
+            dir_recursion[Path(d).resolve()] = False
+        except Exception:
+            dir_recursion[Path(d)] = False
+    for d in args.dirs_recursive or []:
+        try:
+            dir_recursion[Path(d).resolve()] = True
+        except Exception:
+            dir_recursion[Path(d)] = True
+
     return CommentExtractorConfig(
-        directories=args.directories,
-        include_pattern=args.pattern,
-        recursive=args.recursive,
+        directories=directories,
+        include_pattern=include_pattern,
+        recursive=bool(args.recursive),
         exclude_dirs=set(args.exclude_dirs or []),
         exclude_names=set(args.exclude_names or []),
         exclude_patterns=set(args.exclude_patterns or []),
@@ -1138,21 +1190,23 @@ def create_config_from_args(args: argparse.Namespace) -> CommentExtractorConfig:
         comment_symbols=args.comment_symbols,
         exclude_comment_pattern=args.exclude_comment_pattern,
         language_filter=args.language if LANGDETECT_AVAILABLE else None,
-        remove_comments=args.remove_comments,
-        preview_mode=args.preview,
+        remove_comments=bool(args.remove_comments),
+        preview_mode=bool(args.preview),
         export_file=args.export_comments,
         log_file=args.output,
-        use_cache=not args.no_cache,
+        use_cache=not bool(args.no_cache),
         min_langdetect_len=int(args.min_langdetect_len),
         keep_backups=bool(args.keep_backups) or bool(args.backup_dir),
         backup_dir=args.backup_dir,
         overwrite_backups=bool(args.overwrite_backups),
+        directory_recursion=dir_recursion,
+        split_streams=bool(args.split_streams),
     )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_arguments(argv)
-    _configure_logging(args.output, verbose=args.verbose)
+    _configure_logging(args.output, verbose=bool(args.verbose), split_streams=bool(args.split_streams))
 
     if args.language and not LANGDETECT_AVAILABLE:
         logger.warning("langdetect not installed. Language filter disabled. Install with: pip install langdetect")
@@ -1162,20 +1216,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         processor = CommentProcessor(config)
         result = processor.process_files()
 
-
         if not config.log_file and not config.preview_mode:
-            if config.preview_mode and config.remove_comments:
-                action = "Would remove"
-            elif config.remove_comments:
-                action = "Removed"
-            else:
-                action = "Found"
+            action = "Removed" if config.remove_comments else "Found"
             print(f"\n{action} {result['removed_comments']} comments in {result['total_files']} files")
 
         return 0
 
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user")
+        print("\nOperation cancelled by user", file=sys.stderr)
         return 130
     except Exception as e:
         logger.error("Fatal error: %s", e)
