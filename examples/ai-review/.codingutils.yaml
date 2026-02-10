@@ -1,0 +1,51 @@
+version: 2
+
+globals:
+  output:
+    directory: "./reviews"
+    formatter: "markdown"
+    versioning: "incremental"
+    preserve_structure: true
+
+profiles:
+  oos-20b-local:
+    include_patterns:
+      - "*.py"
+      - "*.ts"
+      - "*.tsx"
+
+    recursive: true
+    use_gitignore: true
+
+    exclude_dirs: ["venv", ".venv", ".git", "__pycache__", "node_modules", "dist", "build"]
+
+    processing:
+      method: "functions"        # functions | classes | files
+      skip_unchanged: true
+      force: false
+      max_workers: 2
+      max_input_tokens: 3000
+      max_memory_mb: 500
+      token_method: "approximate"
+      continue_on_error: true
+
+    llm:
+      provider: "lmstudio"
+      api_base: "http://localhost:1234/v1"
+      model: "oos-20B"
+      temperature: 0.2
+      max_output_tokens: 512
+      context_window: 8192
+      timeout: 60
+      max_retries: 3
+
+    prompt:
+      system_prompt: "prompts/system.md"
+      user_prompt: "prompts/review.md"
+      include_context: false
+
+  dry-run:
+    extends: oos-20b-local
+    llm:
+      provider: "mock"
+      model: "mock"
