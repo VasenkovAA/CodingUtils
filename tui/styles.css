@@ -1,0 +1,362 @@
+$empty-hatch: right $surface-lighten-1 70%;
+
+* {
+  scrollbar-color: $primary 10%;
+  scrollbar-color-hover: $primary 80%;
+  scrollbar-color-active: $primary;
+  scrollbar-background: $surface-darken-1;
+  scrollbar-background-hover: $surface-darken-1;
+  scrollbar-background-active: $surface-darken-1;
+  scrollbar-size-vertical: 1;
+
+  &:focus {
+    scrollbar-color: $primary 50%;
+  }
+}
+
+ResponseArea {
+  border-subtitle-color: $text-muted;
+  height: 1fr;
+}
+
+Screen {
+  background: $background;
+}
+
+Footer {
+  padding-left: 2;
+}
+
+.section {
+  border: round $accent 40%;
+  border-title-color: $text-accent 50%;
+  border-title-align: right;
+
+  &:focus-within {
+    border: round $accent 100%;
+    border-title-color: $foreground;
+    border-title-style: b;
+  }
+}
+
+.hidden {
+  display: none;
+}
+
+.w-auto {
+  width: auto;
+}
+
+.dock-right {
+  dock: right;
+}
+
+.dock-left {
+  dock: left;
+}
+
+AppHeader {
+  color: $text-primary;
+  padding: 1 3;
+  height: auto;
+  & > #app-user-host {
+      dock: right;
+      color: $text-muted;
+  }
+}
+
+AppBody {
+  padding: 0 2;
+
+  &.layout-horizontal {
+    layout: horizontal;
+
+    & RequestEditor {
+      width: 50%;
+      height: 1fr;
+      border-right: solid $primary;
+      border-bottom: none;
+    }
+
+    & ResponseArea {
+      width: 50%;
+      height: 1fr;
+    }
+  }
+  
+  &.layout-vertical {
+    layout: vertical;
+
+    & RequestEditor {
+      height: 50%;
+    }
+
+    & ResponseArea {
+      height: 50%;
+    }
+  }
+}
+
+#response-status {
+  width: 25;
+  height: 1;
+  padding: 0 1;
+  display: block;
+  color: $text-muted;
+  &.success {
+    color: $text-success;
+  }
+  &.error {
+    color: $text-error;
+  }
+}
+
+Input {
+  padding: 0 1;
+  height: 1;
+  border: none;
+  &.-invalid {
+    padding-left: 0;
+    border-left: outer $error;
+  }
+
+  &:focus {
+    padding-left: 0;
+    border-left: outer $surface-lighten-1;
+    &.-invalid {
+      border-left: outer $error;
+    }
+  }
+}
+
+CommandBar {
+  height: auto;
+  padding: 0 3 0 3;
+
+  & #main-row {
+    height: 1;
+  }
+
+  & #method-selector {
+      width: 16;
+      height: 1;
+      &:blur SelectCurrent {
+        background: $primary-muted;
+        #label {
+          color: $text-primary;
+        }
+      }
+  }
+
+  & #response-status {
+    width: 25;
+    height: 1;
+    padding: 0 1;
+    display: block;
+    color: $text-muted;
+  }
+}
+
+#send-button {
+  min-width: 8;
+  background: $accent-muted;
+  color: $text-accent;
+  text-style: b;
+  &:hover {
+    background-tint: $text-accent 10%;
+  }
+}
+
+FileBrowser {
+  height: 1fr;
+  dock: left;
+  width: auto;
+  max-width: 33%;
+
+  & Tree {
+      color: $foreground 80%;
+      background: transparent;
+      width: 1fr;
+      &:focus {
+        color: $foreground;
+      }
+  }
+
+  #empty-collection-label {
+     color: $text-muted;
+     padding: 1 2;
+     width: 24;
+  }
+}
+
+TextArea {
+  border: none;
+  &:focus {
+      border: none;
+  }
+
+  &#outputs-area {
+    height: 100%;
+  }
+}
+
+OptionsEditor {
+  & #no-body-label {
+      height: 1fr;
+      hatch: $empty-hatch;
+      color: $text-muted;
+  }
+}
+
+Button {
+  padding: 0 1;
+  height: 1;
+  border: none;
+
+  &:disabled {
+    opacity: 40%;
+  }
+}
+
+Select {
+  height: 1;
+  border: none;
+  padding: 0;
+  &:focus {
+    #label {
+      color: $block-cursor-foreground;
+    }
+    SelectCurrent {
+      background: $block-cursor-background;
+      .arrow {
+        color: $block-cursor-foreground;
+      }
+    }
+  }
+  
+  SelectCurrent {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: $surface;
+
+    .arrow {
+      color: $text-disabled;
+    }
+  }
+
+  & > SelectOverlay {
+    padding: 0;
+    border: none;
+  }
+}
+
+#logs-area {
+  height: 100%;
+  padding: 1;
+  
+  & .logs-header {
+    margin-bottom: 1;
+    border-bottom: solid $primary 20%;
+    padding-bottom: 1;
+  }
+  
+  & Static {
+    padding: 0 0 1 0;
+    border: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    
+    &:hover {
+      background: $surface-darken-1;
+    }
+  }
+}
+
+.textual-jump-label {
+  dock: top;
+  color: $text-accent;
+  background: $accent-muted;
+  text-style: bold;
+  padding: 0 1;
+  margin-right: 1;
+  offset-y: -1;
+  height: 1;
+  width: auto;
+}
+
+#textual-jump-info {
+  margin-bottom: 1;
+  dock: bottom;
+  height: 1;
+  width: 1fr;
+  background: $accent-muted;
+  color: $text-accent;
+  hatch: right $accent 30%;
+  
+  & Label {
+    width: auto;
+    padding: 0 1;
+  }
+}
+
+#textual-jump-dismiss {
+  dock: bottom;
+  height: 1;
+  background: transparent;
+  color: $foreground-muted;
+}
+
+FileBrowser {
+  &.section {
+    border-subtitle-align: left;
+  }
+}
+
+/* Стили для чекбокса */
+/* Стили для чекбокса */
+Checkbox {
+  margin: 1 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  height: 1;
+  width: auto;
+}
+
+Checkbox.--checked {
+  color: $text-success;
+}
+
+Checkbox.--indeterminate {
+  color: $text-warning;
+}
+
+/* Внешний контейнер чекбокса */
+Checkbox > .checkbox--container {
+  padding: 0;
+  margin: 0;
+  height: 1;
+  width: auto;
+}
+
+/* Внутренний квадратик чекбокса */
+Checkbox > .checkbox--container > .checkbox--checkbox {
+  width: 1;
+  height: 1;
+  padding: 0;
+  margin: 0 1 0 0;
+  background: $surface;
+  border: solid $primary;
+}
+
+Checkbox:focus > .checkbox--container > .checkbox--checkbox {
+  border: double $primary;
+}
+
+/* Текст чекбокса */
+Checkbox > .checkbox--container > .checkbox--label {
+  padding: 0;
+  margin: 0;
+  height: 1;
+}
