@@ -1,4 +1,4 @@
-
+# tui/tui.py
 from __future__ import annotations
 
 import os
@@ -9,9 +9,7 @@ import socket
 from datetime import datetime
 from pathlib import Path
 
-
 if __name__ == "__main__" and __package__ is None:
-
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from textual.app import App, ComposeResult
@@ -34,7 +32,12 @@ from textual.widgets import (
 from textual.widgets.tree import TreeNode
 
 from tui.plugins_base import ToolPlugin, tool_registry
+import tui.plugins  # noqa: F401
 
+
+# =========================================================
+# Header
+# =========================================================
 
 class AppHeader(Horizontal):
     def __init__(self, *args, **kwargs) -> None:
@@ -43,17 +46,16 @@ class AppHeader(Horizontal):
 
     @staticmethod
     def _compute_user_host() -> str:
-
+        # user
         try:
             user = getpass.getuser() or "user"
         except Exception:
             user = "user"
 
-
+        # host/ip
         host_display = "localhost"
         try:
             hostname = socket.gethostname() or "localhost"
-
 
             ip = None
             for family, _, _, _, sockaddr in socket.getaddrinfo(hostname, None):
@@ -67,20 +69,18 @@ class AppHeader(Horizontal):
             else:
                 host_display = hostname or "localhost"
         except Exception:
-
             pass
 
         return f"{user}@{host_display}"
 
     def compose(self) -> ComposeResult:
-
         yield Label("[b]CodingUtils[/] [dim]v2.0.0[/]", id="app-title")
         yield Label(self._user_host, id="app-user-host")
 
 
-
-
-
+# =========================================================
+# Method selector
+# =========================================================
 
 class CommandSelector(Select):
     def __init__(self) -> None:
@@ -91,7 +91,6 @@ class CommandSelector(Select):
             allow_blank = False
             has_tools = True
         else:
-
             options = [("No tools available", "")]
             initial = ""
             allow_blank = True
@@ -105,16 +104,15 @@ class CommandSelector(Select):
         )
 
         if not has_tools:
-
             try:
                 self.disabled = True
             except Exception:
                 pass
 
 
-
-
-
+# =========================================================
+# Command bar
+# =========================================================
 
 class CommandBar(Horizontal):
     def compose(self) -> ComposeResult:
@@ -124,9 +122,9 @@ class CommandBar(Horizontal):
         yield Static("", id="response-status")
 
 
-
-
-
+# =========================================================
+# File system tree
+# =========================================================
 
 class FileSystemTree(Tree):
     def __init__(self, root_path: Path):
@@ -179,9 +177,9 @@ class FileBrowser(VerticalScroll):
         yield FileSystemTree(Path.cwd())
 
 
-
-
-
+# =========================================================
+# Outputs & Logs
+# =========================================================
 
 class OutputsArea(TextArea):
     def __init__(self) -> None:
@@ -213,7 +211,6 @@ class ResponseArea(Container):
                 yield OutputsArea()
             with TabPane("Logs", id="logs"):
                 yield LogsArea()
-
             with TabPane("Details", id="details"):
                 yield Static("No details", id="details-placeholder")
 
@@ -226,9 +223,9 @@ class ResponseArea(Container):
             pane.mount(widget)
 
 
-
-
-
+# =========================================================
+# Options editor (подменяется плагином)
+# =========================================================
 
 class OptionsEditor(Container):
     """Контейнер с опциями текущего плагина."""
@@ -242,7 +239,7 @@ class OptionsEditor(Container):
     def update_editor(self) -> None:
         """Пересоздать панель опций под текущий инструмент."""
         self.remove_children()
-        screen: MainScreen = self.app.screen
+        screen: MainScreen = self.app.screen  # type: ignore[name-defined]
         tool = screen.current_tool
         if tool is None:
             self.mount(Static("No tools registered"))
@@ -255,9 +252,9 @@ class OptionsEditor(Container):
         self.mount(panel)
 
 
-
-
-
+# =========================================================
+# App body
+# =========================================================
 
 class AppBody(Horizontal):
     def compose(self) -> ComposeResult:
@@ -267,12 +264,11 @@ class AppBody(Horizontal):
             yield ResponseArea(classes="section")
 
 
-
-
-
+# =========================================================
+# Main screen (STATE OWNER – только выбор плагина)
+# =========================================================
 
 class MainScreen(Screen):
-
 
     selected_tool_id = reactive("")
 
@@ -283,7 +279,6 @@ class MainScreen(Screen):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-
         self.plugins: dict[str, ToolPlugin] = {}
 
     def compose(self) -> ComposeResult:
@@ -293,25 +288,21 @@ class MainScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-
         _ = self.current_tool
-
         self.query_one(OptionsEditor).update_editor()
         self.update_cli_bar()
 
-
+    # ---------- свойства ----------
 
     @property
     def current_tool(self) -> ToolPlugin | None:
-
         if not self.plugins:
             self.plugins = tool_registry.create_all(self)
             if self.plugins and not self.selected_tool_id:
-
                 self.selected_tool_id = next(iter(self.plugins))
         return self.plugins.get(self.selected_tool_id)
 
-
+    # ---------- реакции ----------
 
     def watch_selected_tool_id(self, _: str) -> None:
         self.update_cli_bar()
@@ -322,7 +313,7 @@ class MainScreen(Screen):
         tool = self.current_tool
         url_input.value = tool.build_cli_preview() if tool else ""
 
-
+    # ---------- обработчики событий ----------
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "method-selector":
@@ -333,7 +324,7 @@ class MainScreen(Screen):
             options = self.query_one(OptionsEditor)
             options.update_editor()
 
-
+    # ---------- actions ----------
 
     async def action_send_request(self) -> None:
         logs = self.query_one("#logs-area", LogsArea)
@@ -352,9 +343,9 @@ class MainScreen(Screen):
             logs.add_log("ERROR", f"Tool '{self.selected_tool_id}' failed: {e!r}")
 
 
-
-
-
+# =========================================================
+# App
+# =========================================================
 
 class PostingReplicaApp(App):
     CSS_PATH = "styles.css"
