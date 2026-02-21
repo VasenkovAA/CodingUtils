@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
+import shlex
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -29,19 +31,12 @@ from codingutils.common_utils import (
 logger = logging.getLogger(__name__)
 
 
-
-
-
-
 @dataclass(slots=True)
 class MergerConfig(FilterConfig):
-
     output_file: Path = Path("merged_output.txt")
     encoding: str = "utf-8"
 
-
     preview_mode: bool = False
-
 
     include_metadata: bool = True
     include_headers: bool = True
@@ -50,25 +45,29 @@ class MergerConfig(FilterConfig):
     file_separator: str = "-" * 40
     line_number_format: str = "{:>4}: "
 
-
     add_line_numbers: bool = False
     remove_empty_lines: bool = False
     deduplicate_lines: bool = False
-
 
     sort_files: bool = False
     max_file_size: Optional[int] = None
     max_total_size: Optional[int] = None
 
-
     include_binary_placeholders: bool = True
     hash_binary_files: bool = True
     hash_chunk_size: int = 1024 * 1024
 
-
     keep_backups: bool = False
     backup_dir: Optional[Path] = None
     overwrite_backups: bool = False
+
+    # Per-directory recursion overrides: {resolved_path: bool_recursive}
+    directory_recursion: Dict[Path, bool] = field(default_factory=dict)
+
+    # Split stdout/stderr for GUI wrappers:
+    # - progress + short summary to stdout
+    # - logs/errors remain on stderr
+    split_streams: bool = False
 
     def __post_init__(self) -> None:
         FilterConfig.__post_init__(self)
@@ -84,9 +83,14 @@ class MergerConfig(FilterConfig):
         if self.max_total_size is not None and self.max_total_size <= 0:
             raise ValueError("max_total_size must be positive")
 
-
-
-
+        if self.directory_recursion:
+            normalized: Dict[Path, bool] = {}
+            for k, v in self.directory_recursion.items():
+                try:
+                    normalized[Path(k).resolve()] = bool(v)
+                except Exception:
+                    normalized[Path(k)] = bool(v)
+            self.directory_recursion = normalized
 
 
 class SmartFileMerger:
@@ -112,17 +116,12 @@ class SmartFileMerger:
             "output_size": 0,
         }
 
-
-
-
-
     def _resolve_roots(self) -> List[Path]:
         roots = [Path(d).resolve() for d in (self.config.directories or ["."])]
         self._roots = roots
         return roots
 
     def _rel(self, p: Path) -> str:
-
         rp = p.resolve()
         for r in self._roots:
             try:
@@ -130,10 +129,6 @@ class SmartFileMerger:
             except Exception:
                 continue
         return get_relative_path(p)
-
-
-
-
 
     def _create_gitignore_parser(self) -> Optional[GitIgnoreParser]:
         if not (self.config.use_gitignore or self.config.custom_gitignore):
@@ -147,22 +142,23 @@ class SmartFileMerger:
             parser.load_from_file()
         return parser
 
-
-
-
-
     def find_files(self) -> List[Path]:
         roots = self._resolve_roots()
-        files = self._walker.find_files(roots, recursive=self.config.recursive)
 
+        if self.config.directory_recursion:
+            rec_map = {k.resolve(): v for k, v in self.config.directory_recursion.items()}
+            files = self._walker.find_files(roots, recursive=rec_map)
+        else:
+            files = self._walker.find_files(roots, recursive=self.config.recursive)
 
+        # Exclude output file itself
         try:
             out_abs = self.config.output_file.resolve()
             files = [f for f in files if f.resolve() != out_abs]
         except Exception:
             pass
 
-
+        # Exclude backup dir
         if self.config.backup_dir is not None:
             try:
                 bd = self.config.backup_dir.resolve()
@@ -232,10 +228,6 @@ class SmartFileMerger:
 
         return selected, skipped
 
-
-
-
-
     def preview_report(self, files: List[Path]) -> str:
         selected, skipped = self.select_files(files)
 
@@ -244,8 +236,12 @@ class SmartFileMerger:
         lines.append("MERGE PREVIEW")
         lines.append("=" * 60)
         lines.append(f"Output: {self.config.output_file}")
-        lines.append(f"Pattern: {self.config.include_pattern}")
-        lines.append(f"Recursive: {self.config.recursive}")
+        lines.append(f"Pattern(s): {self.config.include_pattern}")
+        lines.append(f"Recursive (default): {self.config.recursive}")
+        if self.config.directory_recursion:
+            lines.append("Recursive (per-dir overrides):")
+            for k, v in sorted(self.config.directory_recursion.items(), key=lambda kv: str(kv[0])):
+                lines.append(f"  - {k}: {'recursive' if v else 'non-recursive'}")
         if self.config.max_depth is not None:
             lines.append(f"Max depth: {self.config.max_depth}")
         if self.config.use_gitignore or self.config.custom_gitignore:
@@ -304,14 +300,7 @@ class SmartFileMerger:
         return "\n".join(lines) + "\n"
 
     def _is_binary_fast(self, p: Path) -> bool:
-        if p.suffix.lower() in FileContentDetector.BINARY_EXTENSIONS:
-            return True
-
-        return False
-
-
-
-
+        return p.suffix.lower() in FileContentDetector.BINARY_EXTENSIONS
 
     def merge(self) -> bool:
         self.stats["start_time"] = time.time()
@@ -330,7 +319,6 @@ class SmartFileMerger:
             logger.error("No files selected after applying limits.")
             return False
 
-
         out_path = self.config.output_file
         out_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = out_path.with_name(out_path.name + ".tmp")
@@ -345,7 +333,8 @@ class SmartFileMerger:
                 if self.config.include_metadata:
                     out.write(self._metadata_header(selected, skipped))
 
-                with ProgressReporter(total=len(selected), description="Merging files", stream=sys.stderr) as progress:
+                progress_stream = sys.stdout if self.config.split_streams else sys.stderr
+                with ProgressReporter(total=len(selected), description="Merging files", stream=progress_stream) as progress:
                     for idx, fp in enumerate(selected, 1):
                         try:
                             self._write_file_section(out, fp, idx, len(selected))
@@ -353,12 +342,12 @@ class SmartFileMerger:
                         except Exception as e:
                             self.stats["files_failed"] = int(self.stats["files_failed"]) + 1
                             out.write(f"[ERROR processing {self._rel(fp)}: {e}]\n")
+                            logger.exception("Failed processing file %s: %s", fp, e)
                         progress.update(1)
 
                 if self.config.include_metadata:
                     self.stats["end_time"] = time.time()
                     out.write(self._footer())
-
 
             tmp_path.replace(out_path)
 
@@ -369,17 +358,20 @@ class SmartFileMerger:
 
             self.stats["end_time"] = time.time()
             self._log_results()
+
+            if self.config.split_streams:
+                sys.stdout.write(self._stdout_summary() + "\n")
+                sys.stdout.flush()
+
             return True
 
         except Exception as e:
             logger.error("Failed to merge: %s", e)
 
-
             try:
                 tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
-
 
             if backup_path and backup_path.exists():
                 try:
@@ -389,23 +381,25 @@ class SmartFileMerger:
 
             return False
 
-
-
-
+    def _stdout_summary(self) -> str:
+        return (
+            f"OK: merged={int(self.stats['files_processed'])} "
+            f"selected={int(self.stats['files_selected'])} "
+            f"found={int(self.stats['files_found'])} "
+            f"output={self.config.output_file} "
+            f"output_size={format_size(int(self.stats['output_size']))}"
+        )
 
     def _write_file_section(self, out, file_path: Path, index: int, total: int) -> None:
-
         if self.config.include_headers:
             header = self._file_header(file_path, index, total)
             if header:
                 out.write(header)
 
-
         wrote_any = False
         for line in self._iter_processed_lines(file_path):
             out.write(line)
             wrote_any = True
-
 
         if wrote_any:
             out.write("\n")
@@ -424,7 +418,6 @@ class SmartFileMerger:
             mtime = st.st_mtime
         except Exception:
             pass
-
 
         enc = FileContentDetector.detect_encoding(file_path)
 
@@ -445,12 +438,7 @@ class SmartFileMerger:
         lines.append("")
         return "\n".join(lines) + "\n"
 
-
-
-
-
     def _iter_processed_lines(self, file_path: Path) -> Iterable[str]:
-
         try:
             size = file_path.stat().st_size
         except Exception:
@@ -461,6 +449,10 @@ class SmartFileMerger:
             yield f"[FILE SKIPPED: exceeds max_file_size {format_size(self.config.max_file_size)}]\n"
             return
 
+        # Jupyter notebook special case (required by tests)
+        if file_path.suffix.lower() == ".ipynb":
+            yield from self._iter_ipynb_lines(file_path)
+            return
 
         if self._is_binary(file_path):
             self.stats["files_skipped_binary"] = int(self.stats["files_skipped_binary"]) + 1
@@ -469,7 +461,6 @@ class SmartFileMerger:
             else:
                 yield "[BINARY FILE SKIPPED]\n"
             return
-
 
         encoding = FileContentDetector.detect_encoding(file_path)
         try:
@@ -510,6 +501,90 @@ class SmartFileMerger:
                 else:
                     yield line + "\n"
 
+    def _iter_ipynb_lines(self, file_path: Path) -> Iterable[str]:
+        """
+        Extract markdown+code cells from *.ipynb.
+        - raw cells ignored
+        - outputs ignored
+        - malformed json => ERROR / Invalid JSON
+        - always emits "{extracted}/{total} cells extracted"
+        """
+        rel = self._rel(file_path)
+        yield f"[NOTEBOOK: {rel}]\n"
+
+        try:
+            raw_text = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            raw_text = file_path.read_text(encoding="latin-1", errors="replace")
+        except Exception as e:
+            self.stats["files_failed"] = int(self.stats["files_failed"]) + 1
+            yield f"[ERROR: failed to read notebook: {e}]\n"
+            return
+
+        try:
+            nb = json.loads(raw_text)
+        except Exception as e:
+            self.stats["files_failed"] = int(self.stats["files_failed"]) + 1
+            yield f"[ERROR: Invalid JSON notebook: {e}]\n"
+            return
+
+        cells = nb.get("cells", [])
+        if not isinstance(cells, list):
+            self.stats["files_failed"] = int(self.stats["files_failed"]) + 1
+            yield "[ERROR: Invalid notebook format: cells is not a list]\n"
+            return
+
+        extractable: List[dict] = []
+        for c in cells:
+            if not isinstance(c, dict):
+                continue
+            ct = c.get("cell_type")
+            if ct in ("markdown", "code"):
+                extractable.append(c)
+
+        cfg = self.config
+        seen: Optional[set[str]] = set() if cfg.deduplicate_lines else None
+        line_no = 0
+
+        def emit(line: str) -> Optional[str]:
+            nonlocal line_no
+            if cfg.remove_empty_lines and not line.strip():
+                return None
+            if seen is not None:
+                if line in seen:
+                    return None
+                seen.add(line)
+            line_no += 1
+            if cfg.add_line_numbers:
+                return cfg.line_number_format.format(line_no) + line + "\n"
+            return line + "\n"
+
+        extracted = 0
+        total = len(extractable)
+
+        for cell in extractable:
+            src = cell.get("source", "")
+            if isinstance(src, list):
+                text = "".join(str(x) for x in src)
+            elif isinstance(src, str):
+                text = src
+            else:
+                text = str(src)
+
+            for raw_line in text.splitlines():
+                out_line = emit(raw_line)
+                if out_line is not None:
+                    yield out_line
+
+            # optional blank line between cells (doesn't break tests)
+            out_line = emit("")
+            if out_line is not None:
+                yield out_line
+
+            extracted += 1
+
+        yield f"{extracted}/{total} cells extracted\n"
+
     def _is_binary(self, file_path: Path) -> bool:
         if file_path.suffix.lower() in FileContentDetector.BINARY_EXTENSIONS:
             return True
@@ -543,10 +618,6 @@ class SmartFileMerger:
         except Exception:
             return ""
 
-
-
-
-
     def _metadata_header(self, files: List[Path], skipped: List[Tuple[Path, str]]) -> str:
         cfg = self.config
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -577,8 +648,12 @@ class SmartFileMerger:
 
         lines.append("")
         lines.append("CONFIGURATION:")
-        lines.append(f"  Pattern: {cfg.include_pattern}")
-        lines.append(f"  Recursive: {cfg.recursive}")
+        lines.append(f"  Pattern(s): {cfg.include_pattern}")
+        lines.append(f"  Recursive (default): {cfg.recursive}")
+        if cfg.directory_recursion:
+            lines.append("  Recursive (per-dir overrides):")
+            for k, v in sorted(cfg.directory_recursion.items(), key=lambda kv: str(kv[0])):
+                lines.append(f"    - {k}: {'recursive' if v else 'non-recursive'}")
         if cfg.max_depth is not None:
             lines.append(f"  Max depth: {cfg.max_depth}")
         if cfg.use_gitignore or cfg.custom_gitignore:
@@ -636,12 +711,7 @@ class SmartFileMerger:
         lines.append("")
         return "\n".join(lines)
 
-
-
-
-
     def _backup_target_path(self, out_file: Path) -> Path:
-
         bak_name = out_file.name + ".bak"
 
         if self.config.backup_dir is None:
@@ -684,10 +754,6 @@ class SmartFileMerger:
         shutil.copy2(out_file, target)
         return target
 
-
-
-
-
     def _log_results(self) -> None:
         end = float(self.stats.get("end_time") or time.time())
         start = float(self.stats.get("start_time") or end)
@@ -708,10 +774,6 @@ class SmartFileMerger:
         logger.info("output_size: %s", format_size(int(self.stats["output_size"])))
         logger.info("processing_time: %.2fs", elapsed)
         logger.info("=" * 60)
-
-
-
-
 
 
 def parse_size_string(size_str: str) -> int:
@@ -736,83 +798,90 @@ def parse_size_string(size_str: str) -> int:
     return int(s)
 
 
+def _flatten_patterns(values: Sequence[str]) -> List[str]:
+    """
+    Accept patterns from argparse in both styles:
+      -p "*.py" "*.txt"
+      -p "*.py *.txt *.*"
+    """
+    out: List[str] = []
+    for v in values:
+        v = (v or "").strip()
+        if not v:
+            continue
+        try:
+            parts = shlex.split(v)
+        except ValueError:
+            parts = v.split()
+        for p in parts:
+            p = p.strip()
+            if p:
+                out.append(p)
+    return out or ["*"]
+
+
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Advanced file merger with intelligent filtering",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=r"""
-Examples:
-
-  file-merger src -r -p "*.py" -o merged.txt
-
-
-  file-merger src tests -r -p "*.py" --preview
-
-
-  file-merger . -r -p "*.log" --no-headers --no-metadata -o logs.txt
-
-
-  file-merger . -r -p "*.txt" --add-line-numbers --remove-empty-lines -o out.txt
-
-
-  file-merger . -r -p "*.py" --compact-file-headers -o merged.txt
-
-
-  file-merger . -r -ig -p "*" -o merged.txt
-
-
-  file-merger . -r -p "*.py" -o merged.txt --keep-backups
-  file-merger . -r -p "*.py" -o merged.txt --backup-dir .backups
-  file-merger . -r -p "*.py" -o merged.txt --backup-dir .backups --overwrite-backups
-""".strip(),
     )
 
+    # Default is empty; we'll fallback to "." only if nothing was specified at all.
+    parser.add_argument("directories", nargs="*", default=[], help="Directories to merge files from (default: .)")
 
-    parser.add_argument("directories", nargs="*", default=["."], help="Directories to merge files from (default: .)")
-    parser.add_argument("-p", "--pattern", default="*", help='File pattern (e.g. "*.py")')
-    parser.add_argument("-r", "--recursive", action="store_true", help="Search directories recursively")
+    # Multiple patterns (backward compatible with single)
+    parser.add_argument(
+        "-p",
+        "--pattern",
+        nargs="+",
+        default=["*"],
+        help='File pattern(s) (e.g. "*.py" "*.txt" "*.*")',
+    )
+
+    parser.add_argument("-r", "--recursive", action="store_true", help="Search directories recursively (default recursion)")
     parser.add_argument("--max-depth", type=int, help="Maximum recursion depth")
 
+    # Per-directory recursion flags
+    parser.add_argument("-d", "--dir", action="append", dest="dirs_nonrecursive", default=[], help="Add directory (non-recursive)")
+    parser.add_argument("-dr", "--dir-recursive", action="append", dest="dirs_recursive", default=[], help="Add directory (recursive)")
 
     parser.add_argument("-o", "--output", type=Path, default=Path("merged_output.txt"), help="Output file path")
     parser.add_argument("--encoding", default="utf-8", help="Output encoding (default: utf-8)")
     parser.add_argument("--log-file", type=Path, help="Write logs to file (default: stderr)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logs")
 
+    parser.add_argument(
+        "--split-streams",
+        action="store_true",
+        help="Send progress+short summary to stdout; keep logs/errors on stderr (useful for GUI wrappers)",
+    )
 
     parser.add_argument("-ed", "--exclude-dir", action="append", dest="exclude_dirs", help="Exclude directory by name (repeatable)")
     parser.add_argument("-en", "--exclude-name", action="append", dest="exclude_names", help="Exclude file by name/wildcard (repeatable)")
     parser.add_argument("-ep", "--exclude-pattern", action="append", dest="exclude_patterns", help="Exclude by path wildcard (repeatable)")
 
-
     parser.add_argument("-gi", "--gitignore", type=Path, help="Use specific .gitignore file")
     parser.add_argument("-ig", "--use-gitignore", action="store_true", help="Auto-discover and use .gitignore")
     parser.add_argument("--no-gitignore", action="store_true", help="Ignore .gitignore")
 
-
     parser.add_argument("--preview", action="store_true", help="Preview what would be merged without merging")
-
 
     parser.add_argument("--no-headers", action="store_false", dest="include_headers", help="Do not include per-file headers")
     parser.add_argument("--no-metadata", action="store_false", dest="include_metadata", help="Do not include global metadata header/footer")
     parser.add_argument("--compact-file-headers", action="store_true", help="Omit relpath and modified datetime lines in per-file header")
     parser.set_defaults(include_headers=True, include_metadata=True)
 
-
     parser.add_argument("--add-line-numbers", action="store_true", help="Add line numbers to file content")
     parser.add_argument("--remove-empty-lines", action="store_true", help="Remove empty/whitespace-only lines")
     parser.add_argument("--deduplicate", action="store_true", dest="deduplicate_lines", help="Deduplicate identical lines within each file")
     parser.add_argument("--sort-files", action="store_true", help="Sort files before merging")
 
-
     parser.add_argument("--max-file-size", help="Max individual file size (e.g. 10MB, 200KB)")
     parser.add_argument("--max-total-size", help="Max total size of selected files (e.g. 100MB)")
-
 
     parser.add_argument("--keep-backups", action="store_true", help="Keep backups of output file before overwrite")
     parser.add_argument("--backup-dir", type=Path, help="Directory to store backups (preserves cwd-relative structure)")
     parser.add_argument("--overwrite-backups", action="store_true", help="Overwrite existing backups (else .bak.1, .bak.2...)")
-
 
     parser.add_argument("--no-binary-placeholders", action="store_false", dest="include_binary_placeholders", help="Skip binary files silently (no placeholder)")
     parser.add_argument("--no-binary-hash", action="store_false", dest="hash_binary_files", help="Do not compute SHA256 for binary files")
@@ -836,10 +905,31 @@ def create_config_from_args(args: argparse.Namespace) -> MergerConfig:
     use_gitignore = bool(args.use_gitignore) and not bool(args.no_gitignore)
     custom_gitignore = None if args.no_gitignore else args.gitignore
 
+    patterns = _flatten_patterns(args.pattern or ["*"])
+    include_pattern = " ".join(patterns)
+
+    directories: List[str] = []
+    directories.extend(args.directories or [])
+    directories.extend(args.dirs_nonrecursive or [])
+    directories.extend(args.dirs_recursive or [])
+    if not directories:
+        directories = ["."]
+    dir_recursion: Dict[Path, bool] = {}
+    for d in args.dirs_nonrecursive or []:
+        try:
+            dir_recursion[Path(d).resolve()] = False
+        except Exception:
+            dir_recursion[Path(d)] = False
+    for d in args.dirs_recursive or []:
+        try:
+            dir_recursion[Path(d).resolve()] = True
+        except Exception:
+            dir_recursion[Path(d)] = True
+
     return MergerConfig(
-        directories=args.directories,
+        directories=directories,
         recursive=bool(args.recursive),
-        include_pattern=args.pattern,
+        include_pattern=include_pattern,
         max_depth=args.max_depth,
         exclude_dirs=set(args.exclude_dirs or []),
         exclude_names=set(args.exclude_names or []),
@@ -863,6 +953,8 @@ def create_config_from_args(args: argparse.Namespace) -> MergerConfig:
         overwrite_backups=bool(args.overwrite_backups),
         include_binary_placeholders=bool(args.include_binary_placeholders),
         hash_binary_files=bool(args.hash_binary_files),
+        directory_recursion=dir_recursion,
+        split_streams=bool(args.split_streams),
     )
 
 
