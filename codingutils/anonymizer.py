@@ -9,7 +9,7 @@ anonymizer — поиск и обезличивание конфиденциал
 - Динамическая подстановка системных данных (имя пользователя, домашняя папка, имя хоста)
 - Поддержка Jupyter Notebook (включая выводы ячеек)
 - Режимы замены: замена на плейсхолдер, удаление строки, хеширование
-- Preview режим без изменения файлов
+- Preview режим (--preview) показывает, что будет изменено, без изменения файлов
 - Экспорт отчёта о найденных совпадениях
 - Интеграция с common_utils: фильтрация файлов, .gitignore, прогресс, резервное копирование, split-streams
 """
@@ -28,7 +28,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 try:
@@ -124,6 +124,8 @@ class AnonymizerConfig(FilterConfig):
 
     mode: str = "replace"
     replacement: str = "[REDACTED]"
+    apply: bool = False
+    preview_mode: bool = False
 
 
     scan_notebooks: bool = True
@@ -138,7 +140,6 @@ class AnonymizerConfig(FilterConfig):
     project_root_placeholder: str = "[PROJECT_ROOT]"
 
 
-    preview_mode: bool = False
     export_matches: Optional[Path] = None
     log_file: Optional[Path] = None
     use_cache: bool = True
@@ -531,18 +532,19 @@ class AnonymizerScanner:
                         continue
 
 
-                    matches.append(AnonymizerMatch(
-                        file=file_path,
-                        relative_path=relative,
-                        rule_name=rule.name,
-                        matched_text=matched_text,
-                        replacement_text=replacement_text,
-                        line=line_no,
-                        column=m.start(),
-                        confidence=rule.confidence,
-                        cell_index=cell_index,
-                        field=field,
-                    ))
+                    if mode != "remove-line":
+                        matches.append(AnonymizerMatch(
+                            file=file_path,
+                            relative_path=relative,
+                            rule_name=rule.name,
+                            matched_text=matched_text,
+                            replacement_text=replacement_text,
+                            line=line_no,
+                            column=m.start(),
+                            confidence=rule.confidence,
+                            cell_index=cell_index,
+                            field=field,
+                        ))
 
                 if applied_in_line:
                     break
@@ -642,6 +644,10 @@ class AnonymizerProcessor:
                     logger.error("Failed to process %s: %s", p, e)
                 progress.update(1)
 
+
+        if self.config.preview_mode and all_matches:
+            self._print_preview(all_matches)
+
         self._log_summary(len(all_matches), modified_files, len(files))
 
         if self.config.export_matches and all_matches:
@@ -653,6 +659,35 @@ class AnonymizerProcessor:
             "modified_files": modified_files,
             "matches": [self._match_to_dict(m) for m in all_matches],
         }
+
+    def _print_preview(self, matches: List[AnonymizerMatch]) -> None:
+        """Выводит предпросмотр изменений в читаемом формате."""
+        out_stream = sys.stdout if self.config.split_streams else sys.stderr
+        out_stream.write("\n" + "=" * 60 + "\n")
+        out_stream.write("PREVIEW OF CHANGES (no files will be modified)\n")
+        out_stream.write("=" * 60 + "\n")
+
+        for m in sorted(matches, key=lambda x: (x.relative_path, x.line, x.column)):
+
+            location = m.relative_path
+            if m.cell_index is not None:
+                location += f" [cell {m.cell_index}]"
+            if m.field and m.field != "source":
+                location += f" ({m.field})"
+
+            line_info = f"{location}:{m.line}:{m.column}"
+
+
+            if m.replacement_text is None:
+
+                change = f"'{m.matched_text}' → [LINE REMOVED]"
+            else:
+                change = f"'{m.matched_text}' → '{m.replacement_text}'"
+
+            out_stream.write(f"  {line_info}  {change}\n")
+
+        out_stream.write("=" * 60 + "\n")
+        out_stream.flush()
 
     def process_file(self, file_path: Path) -> Tuple[List[AnonymizerMatch], bool]:
         """Возвращает (список совпадений, был ли файл изменён)."""
@@ -698,8 +733,8 @@ class AnonymizerProcessor:
         new_lines, matches = scanner.scan_lines(lines, file_path=file_path)
 
         modified = False
-        if matches and not self.config.preview_mode:
 
+        if matches and self.config.apply and not self.config.preview_mode:
             backup_path = None
             try:
                 if self.config.keep_backups:
@@ -714,6 +749,7 @@ class AnonymizerProcessor:
                 if not ok:
                     raise RuntimeError(f"Failed to write updated file: {file_path}")
                 modified = True
+                logger.info("Modified %s", file_path)
             except Exception as e:
                 logger.error("Error writing file %s: %s", file_path, e)
 
@@ -725,6 +761,11 @@ class AnonymizerProcessor:
                         pass
                 raise
         elif matches and self.config.preview_mode:
+
+            logger.debug("Preview mode – would modify %s", file_path)
+            modified = False
+        else:
+
             modified = False
 
         return matches, modified
@@ -744,7 +785,6 @@ class AnonymizerProcessor:
 
         cells = nb.get("cells", [])
         for cell_idx, cell in enumerate(cells):
-            cell_type = cell.get("cell_type", "unknown")
 
             source = cell.get("source", [])
             if isinstance(source, str):
@@ -762,7 +802,7 @@ class AnonymizerProcessor:
                     field="source",
                 )
                 all_matches.extend(source_matches)
-                if source_matches and not self.config.preview_mode:
+                if source_matches and self.config.apply and not self.config.preview_mode:
                     if isinstance(source, str):
                         cell["source"] = "".join(new_source_lines)
                     else:
@@ -791,7 +831,7 @@ class AnonymizerProcessor:
                                 field=field_name,
                             )
                             all_matches.extend(out_matches)
-                            if out_matches and not self.config.preview_mode:
+                            if out_matches and self.config.apply and not self.config.preview_mode:
                                 if isinstance(val, list):
                                     out[field_name] = new_lines
                                 else:
@@ -811,7 +851,7 @@ class AnonymizerProcessor:
                                 field=mime,
                             )
                             all_matches.extend(data_matches)
-                            if data_matches and not self.config.preview_mode:
+                            if data_matches and self.config.apply and not self.config.preview_mode:
                                 if isinstance(content, str):
                                     out["data"][mime] = "".join(new_lines)
                                 else:
@@ -824,7 +864,7 @@ class AnonymizerProcessor:
 
                 pass
 
-        if modified and not self.config.preview_mode:
+        if modified and self.config.apply and not self.config.preview_mode:
 
             backup_path = None
             try:
@@ -844,6 +884,9 @@ class AnonymizerProcessor:
                     except Exception:
                         pass
                 raise
+        elif all_matches and self.config.preview_mode:
+            logger.debug("Preview mode – would modify notebook %s", file_path)
+            modified = False
 
         return all_matches, modified
 
@@ -868,9 +911,9 @@ class AnonymizerProcessor:
     def _next_versioned_backup_path(p: Path) -> Path:
         i = 1
         while True:
-            candidate = Path(str(p) + f".{i}")
-            if not candidate.exists():
-                return candidate
+            cand = Path(str(p) + f".{i}")
+            if not cand.exists():
+                return cand
             i += 1
 
     def _create_persistent_backup(self, file_path: Path) -> Optional[Path]:
@@ -951,6 +994,7 @@ class AnonymizerProcessor:
         logger.info("Env files: %s", ", ".join(str(p) for p in self.config.env_files) or "none")
         logger.info("Mode: %s", self.config.mode)
         logger.info("Global replacement: %s", self.config.replacement)
+        logger.info("Apply changes: %s", self.config.apply)
         logger.info("Preview mode: %s", self.config.preview_mode)
         logger.info("Scan notebooks: %s", self.config.scan_notebooks)
         logger.info("Scan outputs: %s", self.config.scan_outputs)
@@ -962,7 +1006,9 @@ class AnonymizerProcessor:
         logger.info("=" * 60)
         logger.info("Found %d matches in %d files", matches, files)
         if self.config.preview_mode:
-            logger.info("Preview mode – no files were modified.")
+            logger.info("Preview mode – no files were modified (use --apply to actually redact).")
+        elif not self.config.apply:
+            logger.info("Search mode – no files were modified (use --apply to redact).")
         else:
             logger.info("Modified %d files", modified)
         logger.info("=" * 60)
@@ -1019,6 +1065,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     parser.add_argument("--mode", choices=["replace", "remove-line", "hash"], default="replace", help="Default redaction mode")
     parser.add_argument("--replacement", default="[REDACTED]", help="Global placeholder for replaced text")
+    parser.add_argument("--apply", action="store_true", help="Actually apply redactions to files (default: search only)")
+    parser.add_argument("--preview", action="store_true", help="Preview what would be redacted (without modifying files)")
 
 
     parser.add_argument("--no-scan-notebooks", action="store_false", dest="scan_notebooks", help="Skip Jupyter notebooks")
@@ -1033,7 +1081,6 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--project-root-placeholder", default="[PROJECT_ROOT]", help="Placeholder for project root")
 
 
-    parser.add_argument("--preview", action="store_true", help="Preview matches without modifying files")
     parser.add_argument("--export-matches", type=Path, help="Export matches to file (.txt/.json/.jsonl)")
     parser.add_argument("-o", "--output", type=Path, help="Log file for diagnostic messages")
     parser.add_argument("--log-file", type=Path, help="Legacy alias for --output")
@@ -1096,6 +1143,10 @@ def create_config_from_args(args: argparse.Namespace) -> AnonymizerConfig:
             if g:
                 builtin_groups.add(g)
 
+
+    if args.preview and not args.apply:
+        logger.info("--preview used without --apply. Showing preview of potential changes (no files will be modified).")
+
     return AnonymizerConfig(
         directories=directories,
         include_pattern=include_pattern,
@@ -1111,6 +1162,8 @@ def create_config_from_args(args: argparse.Namespace) -> AnonymizerConfig:
         env_files=args.env_files or [],
         mode=args.mode,
         replacement=args.replacement,
+        apply=bool(args.apply),
+        preview_mode=bool(args.preview),
         scan_notebooks=bool(args.scan_notebooks),
         scan_outputs=bool(args.scan_outputs),
         scan_metadata=bool(args.scan_metadata),
@@ -1119,7 +1172,6 @@ def create_config_from_args(args: argparse.Namespace) -> AnonymizerConfig:
         home_placeholder=args.home_placeholder,
         hostname_placeholder=args.hostname_placeholder,
         project_root_placeholder=args.project_root_placeholder,
-        preview_mode=bool(args.preview),
         export_matches=args.export_matches,
         log_file=args.output,
         use_cache=not bool(args.no_cache),
