@@ -7,7 +7,7 @@ long_description = (here / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="codingutils",
-    version="1.3.0",
+    version="1.4.0",
     description="A comprehensive set of Python utilities for code analysis and file management",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -32,6 +32,7 @@ setup(
             "comment-extractor=codingutils.comment_extractor:main",
             "file-merger=codingutils.merger:main",
             "tree-generator=codingutils.tree_generater:main",
+            "anonymizer = codingutils.anonymizer:main",
         ],
     },
     project_urls={
