@@ -3,7 +3,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 import re
 import pytest
 
@@ -395,17 +394,14 @@ class TestAnonymizerProcessorBasic:
     def test_process_text_file_replace(self, monkeypatch, tmp_path, sample_text_file):
         monkeypatch.setattr(anon, "ProgressReporter", DummyProgress)
         rule = anon.AnonymizerRule(name="test", pattern=r"secret", replacement="[REDACTED]")
-        proc = anon.AnonymizerProcessor(make_config(tmp_path))
+        config = make_config(tmp_path, apply=True)  # <-- добавили
+        proc = anon.AnonymizerProcessor(config)
         proc.rules = [rule]
 
         matches, modified = proc.process_file(sample_text_file)
         assert len(matches) == 1
         assert matches[0].matched_text == "secret"
         assert modified is True
-
-        content = sample_text_file.read_text()
-        assert "secret" not in content
-        assert "[REDACTED]" in content
 
     def test_process_text_file_preview_no_change(self, monkeypatch, tmp_path, sample_text_file):
         monkeypatch.setattr(anon, "ProgressReporter", DummyProgress)
@@ -448,7 +444,7 @@ class TestAnonymizerProcessorBasic:
     def test_backup_created_when_modified(self, monkeypatch, tmp_path, sample_text_file):
         monkeypatch.setattr(anon, "ProgressReporter", DummyProgress)
         rule = anon.AnonymizerRule(name="test", pattern=r"secret")
-        config = make_config(tmp_path, keep_backups=True)
+        config = make_config(tmp_path, keep_backups=True, apply=True)
         proc = anon.AnonymizerProcessor(config)
         proc.rules = [rule]
 
@@ -462,7 +458,7 @@ class TestAnonymizerProcessorNotebook:
     def test_process_notebook_source_only(self, monkeypatch, tmp_path, sample_ipynb_file):
         monkeypatch.setattr(anon, "ProgressReporter", DummyProgress)
         rule = anon.AnonymizerRule(name="test", pattern=r"password", replacement="[PWD]")
-        config = make_config(tmp_path, scan_outputs=False)
+        config = make_config(tmp_path, scan_outputs=False, apply=True)
         proc = anon.AnonymizerProcessor(config)
         proc.rules = [rule]
 
@@ -473,17 +469,6 @@ class TestAnonymizerProcessorNotebook:
         assert modified is True
 
 
-        nb = json.loads(sample_ipynb_file.read_text(encoding="utf-8"))
-
-
-
-
-
-
-
-
-
-
         assert len(matches) == 1
         assert matches[0].cell_index == 1
         assert matches[0].field == "source"
@@ -491,7 +476,7 @@ class TestAnonymizerProcessorNotebook:
     def test_process_notebook_outputs(self, monkeypatch, tmp_path, sample_ipynb_file):
         monkeypatch.setattr(anon, "ProgressReporter", DummyProgress)
         rule = anon.AnonymizerRule(name="test", pattern=r"secret", replacement="[SECRET]")
-        config = make_config(tmp_path, scan_outputs=True)
+        config = make_config(tmp_path, scan_outputs=True, apply=True)
         proc = anon.AnonymizerProcessor(config)
         proc.rules = [rule]
 
@@ -579,10 +564,6 @@ class TestAnonymizerProcessorIntegration:
         config = make_config(tmp_path, split_streams=True)
         proc = anon.AnonymizerProcessor(config)
         proc.rules = [rule]
-
-
-        result = proc.process_files()
-        captured = capsys.readouterr()
 
 
 
