@@ -1,4 +1,5 @@
 import builtins
+import json
 from pathlib import Path
 
 import codingutils.merger as mg
@@ -455,6 +456,306 @@ def test_output_backup_dir_and_overwrite(monkeypatch, tmp_path):
     # Because out is not under cwd typically, backup path falls back to <backup_dir>/<name>.bak
     bak = bd / "merged.txt.bak"
     assert bak.exists()
+
+
+# =============================================================================
+# .ipynb (Jupyter Notebook) tests
+# =============================================================================
+
+def create_sample_ipynb(tmp_path: Path, name: str = "sample.ipynb") -> Path:
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "source": ["# Test Notebook\n", "This is a markdown cell."],
+            },
+            {
+                "cell_type": "code",
+                "execution_count": 1,
+                "source": ["import numpy as np\n", "print('Hello')"],
+                "outputs": [{"output_type": "stream", "text": ["Hello\n"]}],
+            },
+        ],
+        "metadata": {"kernelspec": {"display_name": "Python 3"}},
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+
+    notebook_path = tmp_path / name
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+    return notebook_path
+
+
+def test_ipynb_not_treated_as_binary(tmp_path):
+    create_sample_ipynb(tmp_path)
+
+    cfg = make_config(tmp_path, include_pattern="*.ipynb")
+    merger = mg.SmartFileMerger(cfg)
+
+    ipynb_files = list(tmp_path.glob("*.ipynb"))
+    assert len(ipynb_files) == 1
+    assert merger._is_binary_fast(ipynb_files[0]) is False
+    assert merger._is_binary(ipynb_files[0]) is False
+
+
+def test_ipynb_basic_processing(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    create_sample_ipynb(tmp_path)
+    out_file = tmp_path / "merged.txt"
+
+    cfg = make_config(
+        tmp_path,
+        output_file=out_file,
+        include_headers=False,
+        include_metadata=False,
+        include_pattern="*.ipynb",
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    assert merger.merge() is True
+    content = out_file.read_text(encoding="utf-8")
+
+    assert "[NOTEBOOK:" in content
+    assert "# Test Notebook" in content
+    assert "import numpy as np" in content
+    assert "print('Hello')" in content
+    lines = content.split("\n")
+    assert "Hello" not in [
+        line.strip()
+        for line in lines
+        if line.strip() and line.strip() != "print('Hello')"
+    ]
+
+
+def test_ipynb_extracts_markdown_and_code_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    notebook = {
+        "cells": [
+            {"cell_type": "raw", "source": ["RAW: ignored"]},
+            {"cell_type": "markdown", "source": ["## Markdown cell"]},
+            {
+                "cell_type": "code",
+                "source": ["x = 1"],
+                "outputs": [{"text": ["output"]}],
+            },
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+
+    notebook_path = tmp_path / "test.ipynb"
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+
+    out_file = tmp_path / "merged.txt"
+    cfg = make_config(
+        tmp_path,
+        output_file=out_file,
+        include_headers=False,
+        include_metadata=False,
+        include_pattern="*.ipynb",
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    assert merger.merge() is True
+    content = out_file.read_text(encoding="utf-8")
+
+    assert "## Markdown cell" in content
+    assert "x = 1" in content
+    assert "RAW: ignored" not in content
+    assert "output" not in content
+
+
+def test_ipynb_malformed_json_handling(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    notebook_path = tmp_path / "bad.ipynb"
+    notebook_path.write_text("{ invalid json }", encoding="utf-8")
+
+    out_file = tmp_path / "merged.txt"
+    cfg = make_config(
+        tmp_path,
+        output_file=out_file,
+        include_headers=False,
+        include_metadata=False,
+        include_pattern="*.ipynb",
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    assert merger.merge() is True
+    content = out_file.read_text(encoding="utf-8")
+    assert "ERROR" in content or "Invalid JSON" in content
+
+
+def test_ipynb_empty_notebook_handling(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    notebook = {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 4}
+    notebook_path = tmp_path / "empty.ipynb"
+    notebook_path.write_text(json.dumps(notebook), encoding="utf-8")
+
+    out_file = tmp_path / "merged.txt"
+    cfg = make_config(
+        tmp_path,
+        output_file=out_file,
+        include_headers=False,
+        include_metadata=False,
+        include_pattern="*.ipynb",
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    assert merger.merge() is True
+    content = out_file.read_text(encoding="utf-8")
+    assert "0/0 cells extracted" in content
+
+
+def test_ipynb_with_mixed_file_types(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    create_sample_ipynb(tmp_path)
+    py_file = tmp_path / "script.py"
+    py_file.write_text("# Python file\nprint('test')", encoding="utf-8")
+
+    out_file = tmp_path / "merged.txt"
+    cfg = make_config(
+        tmp_path,
+        output_file=out_file,
+        include_pattern="*",
+        include_headers=False,
+        include_metadata=False,
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    assert merger.merge() is True
+    content = out_file.read_text(encoding="utf-8")
+
+    assert "[NOTEBOOK:" in content
+    assert "# Python file" in content
+
+
+def test_ipynb_respects_file_size_limit(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    create_sample_ipynb(tmp_path)
+
+    cfg = make_config(
+        tmp_path,
+        output_file=tmp_path / "merged.txt",
+        include_pattern="*.ipynb",
+        max_file_size=10,
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    files = merger.find_files()
+    selected, skipped = merger.select_files(files)
+
+    assert len(selected) == 0
+    assert len(skipped) == 1
+    assert skipped[0][1] == "max_file_size"
+
+
+def test_ipynb_preview_mode(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    create_sample_ipynb(tmp_path)
+
+    cfg = make_config(
+        tmp_path,
+        output_file=tmp_path / "merged.txt",
+        include_pattern="*.ipynb",
+        preview_mode=True,
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    result = merger.merge()
+    assert result is True
+    assert not cfg.output_file.exists()
+
+    files = merger.find_files()
+    preview = merger.preview_report(files)
+    assert "MERGE PREVIEW" in preview
+    assert "sample.ipynb" in preview
+
+
+def test_ipynb_source_formats(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    notebook1 = {
+        "cells": [{"cell_type": "code", "source": "x = 1\ny = 2"}],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+
+    notebook2 = {
+        "cells": [{"cell_type": "code", "source": ["x = 1\n", "y = 2\n"]}],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+
+    tmp_path.joinpath("string.ipynb").write_text(
+        json.dumps(notebook1), encoding="utf-8"
+    )
+    tmp_path.joinpath("list.ipynb").write_text(json.dumps(notebook2), encoding="utf-8")
+
+    out_file = tmp_path / "merged.txt"
+    cfg = make_config(
+        tmp_path,
+        output_file=out_file,
+        include_headers=False,
+        include_metadata=False,
+        include_pattern="*.ipynb",
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    assert merger.merge() is True
+    content = out_file.read_text(encoding="utf-8")
+
+    assert "x = 1" in content
+    assert "y = 2" in content
+    assert content.count("x = 1") == 2
+
+
+def test_ipynb_unicode_support(monkeypatch, tmp_path):
+    monkeypatch.setattr(mg, "ProgressReporter", DummyProgress)
+
+    notebook = {
+        "cells": [
+            {
+                "cell_type": "markdown",
+                "source": [
+                    "# Unicode test\n",
+                    "Russian text: привет\n",
+                    "Special characters: café ☕ > < &",
+                ],
+            }
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 4,
+    }
+
+    notebook_path = tmp_path / "unicode.ipynb"
+    notebook_path.write_text(json.dumps(notebook, ensure_ascii=False), encoding="utf-8")
+
+    out_file = tmp_path / "merged.txt"
+    cfg = make_config(
+        tmp_path,
+        output_file=out_file,
+        include_headers=False,
+        include_metadata=False,
+        include_pattern="*.ipynb",
+    )
+    merger = mg.SmartFileMerger(cfg)
+
+    assert merger.merge() is True
+    content = out_file.read_text(encoding="utf-8")
+
+    assert "Russian text: привет" in content
+    assert "café ☕" in content
 
 
 # =============================================================================
