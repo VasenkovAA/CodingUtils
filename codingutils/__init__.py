@@ -7,7 +7,7 @@ from .comment_extractor import CommentProcessor, main as comment_extractor_main
 from .merger import SmartFileMerger, main as merger_main
 from .tree_generater import ProjectTreeGenerator, main as tree_generator_main
 
-__version__ = "1.0.0"
+__version__ = "1.5.0"
 __author__ = "VasenkovAA"
 __email__ = "NoN"
 

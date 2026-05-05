@@ -10,7 +10,12 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "langdetect>=1.0.9",
+    "textual>=0.40.0",
+    "rich>=13.0.0",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "codingutils.__version__" }
 
 [project.optional-dependencies]
 dev = [
@@ -24,3 +29,4 @@ comment-extractor = "codingutils.comment_extractor:main"
 file-merger = "codingutils.merger:main"
 tree-generator = "codingutils.tree_generater:main"
 anonymizer = "codingutils.anonymizer:main"
+tui-manager = "codingutils.tui.app:main"
